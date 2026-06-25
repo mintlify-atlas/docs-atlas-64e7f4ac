@@ -1,0 +1,287 @@
+---
+title: "Deploy DayTrader 7 on Open Liberty with Derby or DB2"
+sidebarTitle: "Local Deployment"
+description: "Step-by-step instructions for deploying DayTrader 7 locally on Open Liberty using embedded Derby for development or external DB2 for benchmarking."
+---
+
+DayTrader 7 supports two local deployment modes. For quick development and functional testing, the application ships with a pre-built embedded Derby database that requires no external infrastructure — just a JDK and Maven. For production benchmarking and performance testing, DayTrader 7 connects to an external DB2 server via the `server_db2.xml` configuration, enabling full load-test workloads with Apache JMeter and realistic database concurrency tuning.
+
+## Option 1: Development with Derby
+
+The Derby path is the fastest way to get DayTrader 7 running. The embedded database and a pre-populated dataset are bundled in `resources/data`, so no separate database setup is needed.
+
+### Prerequisites
+
+- JDK 8 or later
+- Apache Maven 3 or later
+
+### Steps
+
+<Steps>
+  <Step title="Build the project">
+    From the root of the cloned repository, run the Maven install goal. This compiles all modules, runs tests, and provisions a local Open Liberty server under `daytrader-ee7/target/liberty/`:
+
+    ```bash
+    mvn install
+    ```
+  </Step>
+
+  <Step title="Start Open Liberty">
+    Change into the `daytrader-ee7` module and launch the server with the `liberty:run` goal, which starts Liberty in the foreground and tails the logs:
+
+    ```bash
+    cd daytrader-ee7
+    mvn liberty:run
+    ```
+  </Step>
+
+  <Step title="Open the application">
+    Once Liberty reports that the server is ready, navigate to:
+
+    ```
+    http://localhost:9082/daytrader
+    ```
+
+    The server also listens for HTTPS traffic on port **9443**.
+  </Step>
+
+  <Step title="Initialize the database">
+    On first run, visit the configuration page and populate the trade database:
+
+    ```
+    http://localhost:9082/daytrader/configure.html
+    ```
+
+    Click **"(Re)-create DayTrader Database Tables and Indexes"**, then click **"(Re)-populate DayTrader Database"**.
+  </Step>
+</Steps>
+
+### Server configuration (Derby)
+
+The Derby deployment uses `server.xml`. Key settings relevant to local development are shown below:
+
+```xml
+<server>
+  <featureManager>
+    <feature>ejb-3.2</feature>
+    <feature>servlet-3.1</feature>
+    <feature>jsf-2.2</feature>
+    <feature>jpa-2.1</feature>
+    <feature>mdb-3.2</feature>
+    <feature>wasJmsServer-1.0</feature>
+    <feature>wasJmsClient-2.0</feature>
+    <feature>cdi-1.2</feature>
+    <feature>websocket-1.1</feature>
+    <feature>concurrent-1.0</feature>
+    <feature>jsonp-1.0</feature>
+    <feature>beanValidation-1.1</feature>
+    <feature>localConnector-1.0</feature>
+  </featureManager>
+
+  <!-- HTTP on 9082, HTTPS on 9443 -->
+  <httpEndpoint host="*" httpPort="9082" httpsPort="9443" id="defaultHttpEndpoint">
+    <tcpOptions soReuseAddr="true"/>
+    <httpOptions maxKeepAliveRequests="-1"/>
+  </httpEndpoint>
+
+  <application id="daytrader7" location="daytrader-ee7.ear" name="daytrader7"/>
+
+  <!-- Connection pool: 100 min/max connections, no idle timeout -->
+  <connectionManager agedTimeout="-1" connectionTimeout="0" id="conMgr1"
+    maxIdleTime="-1" maxPoolSize="100" minPoolSize="100"
+    purgePolicy="FailingConnectionOnly" reapTime="-1"/>
+
+  <jdbcDriver id="DerbyEmbedded" libraryRef="DerbyLib"/>
+  <library filesetRef="DerbyFileset" id="DerbyLib"/>
+  <fileset dir="${shared.resource.dir}/DerbyLibs" id="DerbyFileset"
+    includes="derby-10.14.2.0.jar"/>
+
+  <dataSource connectionManagerRef="conMgr1" id="DefaultDataSource"
+    isolationLevel="TRANSACTION_READ_COMMITTED" jdbcDriverRef="DerbyEmbedded"
+    jndiName="jdbc/TradeDataSource" statementCacheSize="60">
+    <properties.derby.embedded createDatabase="create"
+      databaseName="${shared.resource.dir}/data/tradedb"
+      password="db_password" user="db_username"/>
+  </dataSource>
+</server>
+```
+
+<Note>
+  The connection pool is configured with `maxPoolSize=100` and `minPoolSize=100`. Liberty pre-allocates all 100 connections at startup, so the first request may be slightly slower while the pool warms up.
+</Note>
+
+---
+
+## Option 2: Production / Benchmarking with DB2
+
+This setup mirrors the recommended load-testing topology described in `README_LOAD_TEST.md`. It uses `server_db2.xml` (copied over as `server.xml`) so Liberty connects to an external DB2 instance over JDBC Type 4.
+
+### Prerequisites
+
+- Open Liberty installed and a `defaultServer` profile created at `<OPENLIBERTY_HOME>`
+- A running DB2 server with a `TRADEDB` database created
+- DB2 JDBC driver files copied from the DB2 machine:
+  - `db2jcc4.jar`
+  - `db2jcc_license_cu.jar`
+
+### Steps
+
+<Steps>
+  <Step title="Build DayTrader 7">
+    From the repository root, build the EAR artifact:
+
+    ```bash
+    mvn clean install
+    ```
+  </Step>
+
+  <Step title="Deploy the EAR to Liberty">
+    Copy the compiled EAR to the Liberty apps directory:
+
+    ```bash
+    cp daytrader-ee7/target/daytrader-ee7.ear \
+      <OPENLIBERTY_HOME>/usr/servers/defaultServer/apps/
+    ```
+  </Step>
+
+  <Step title="Install the DB2 server configuration">
+    Replace the default `server.xml` with the DB2-specific configuration:
+
+    ```bash
+    cp daytrader-ee7/src/main/liberty/config/server_db2.xml \
+      <OPENLIBERTY_HOME>/usr/servers/defaultServer/server.xml
+    ```
+  </Step>
+
+  <Step title="Copy DB2 JDBC jars">
+    Place the DB2 driver files where Liberty can find them:
+
+    ```bash
+    mkdir -p <OPENLIBERTY_HOME>/usr/shared/db2jars
+    cp db2jcc4.jar          <OPENLIBERTY_HOME>/usr/shared/db2jars/
+    cp db2jcc_license_cu.jar <OPENLIBERTY_HOME>/usr/shared/db2jars/
+    ```
+  </Step>
+
+  <Step title="Set environment variables">
+    Export the five variables that `server_db2.xml` resolves at runtime. Match values to your environment:
+
+    ```bash
+    export dbUser=db2inst1
+    export dbPass=<your_db2_password>
+    export tradeDbHost=<db2_hostname_or_ip>
+    export tradeDbPort=50000
+    export tradeDbName=TRADEDB
+    ```
+
+    | Variable | Description |
+    |---|---|
+    | `dbUser` | DB2 user name Liberty uses to authenticate |
+    | `dbPass` | Password for `dbUser` |
+    | `tradeDbHost` | Hostname or IP of the DB2 server |
+    | `tradeDbPort` | DB2 listener port (default `50000`) |
+    | `tradeDbName` | DB2 database name (default `TRADEDB`) |
+
+    <Tip>
+      You can hard-code these values directly in `server.xml` instead of using environment variables if you prefer a self-contained configuration file.
+    </Tip>
+  </Step>
+
+  <Step title="Create jvm.options">
+    Create `<OPENLIBERTY_HOME>/usr/servers/defaultServer/jvm.options` and set the heap size. The following values are recommended as a starting point for load testing:
+
+    ```
+    -Xms1024m
+    -Xmx1024m
+    ```
+  </Step>
+
+  <Step title="Create and populate the DB2 database">
+    On the DB2 machine, sign in as the `db2` user and create the trade database:
+
+    ```bash
+    db2 create db tradedb
+    ```
+
+    <Note>
+      If `DB2_APM_PERFORMANCE` is enabled, DB2 will return `SQL1803N` during database creation. Disable it first:
+
+      ```bash
+      db2set DB2_APM_PERFORMANCE=
+      db2stop
+      db2start
+      ```
+    </Note>
+  </Step>
+
+  <Step title="Start Liberty and initialize the database">
+    Start the Liberty server:
+
+    ```bash
+    <OPENLIBERTY_HOME>/bin/server start
+    ```
+
+    Then open the DayTrader configuration page in a browser and populate the database:
+
+    ```
+    http://<openliberty-hostname>:9082/daytrader/configure.html
+    ```
+
+    Click **"(Re)-create DayTrader Database Tables and Indexes"**, then **"(Re)-populate DayTrader Database"**.
+  </Step>
+</Steps>
+
+### Server configuration (DB2)
+
+`server_db2.xml` replaces the Derby driver and data-source definitions with DB2 JDBC Type 4 equivalents that resolve credentials and connection details from environment variables:
+
+```xml
+<server>
+  <featureManager>
+    <feature>ejb-3.2</feature>
+    <feature>servlet-3.1</feature>
+    <feature>jsf-2.2</feature>
+    <feature>jpa-2.1</feature>
+    <feature>mdb-3.2</feature>
+    <feature>wasJmsServer-1.0</feature>
+    <feature>wasJmsClient-2.0</feature>
+    <feature>cdi-1.2</feature>
+    <feature>websocket-1.1</feature>
+    <feature>concurrent-1.0</feature>
+    <feature>jsonp-1.0</feature>
+    <feature>beanValidation-1.1</feature>
+    <feature>localConnector-1.0</feature>
+  </featureManager>
+
+  <httpEndpoint host="*" httpPort="9082" httpsPort="9443" id="defaultHttpEndpoint">
+    <tcpOptions soReuseAddr="true"/>
+    <httpOptions maxKeepAliveRequests="-1"/>
+  </httpEndpoint>
+
+  <application id="daytrader7" location="daytrader-ee7.ear" name="daytrader7"/>
+
+  <connectionManager agedTimeout="-1" connectionTimeout="0" id="conMgr1"
+    maxIdleTime="-1" maxPoolSize="100" minPoolSize="100"
+    purgePolicy="FailingConnectionOnly" reapTime="-1"/>
+
+  <jdbcDriver id="DB2JCC" libraryRef="DB2JCCLib"/>
+  <library id="DB2JCCLib" filesetRef="DB2JCCFileset"/>
+  <fileset id="DB2JCCFileset" dir="${shared.resource.dir}/db2jars" includes="db2jcc4.jar"/>
+
+  <authData id="TradeDataSourceAuthData" user="${dbUser}" password="${dbPass}"/>
+  <authData id="TradeAdminAuthData"      user="${dbUser}" password="${dbPass}"/>
+
+  <dataSource jndiName="jdbc/TradeDataSource" jdbcDriverRef="DB2JCC"
+    id="DefaultDataSource" connectionManagerRef="conMgr1"
+    statementCacheSize="60" isolationLevel="TRANSACTION_READ_COMMITTED"
+    type="javax.sql.ConnectionPoolDataSource">
+    <properties serverName="${tradeDbHost}" portNumber="${tradeDbPort}"
+      databaseName="${tradeDbName}" driverType="4"
+      user="${dbUser}" password="${dbPass}"/>
+  </dataSource>
+</server>
+```
+
+<Note>
+  After the first-time database population completes, **stop and restart Liberty** before running any load tests. This ensures all connection pool and JMS resources are cleanly initialized against the now-populated schema.
+</Note>

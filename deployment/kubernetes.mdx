@@ -1,0 +1,287 @@
+---
+title: "Deploy DayTrader 7 on Kubernetes with OpenLiberty Operator"
+sidebarTitle: "Kubernetes"
+description: "Deploy DayTrader 7 to a Kubernetes cluster using the OpenLiberty Operator and DB2 backend, with provided YAML manifests."
+---
+
+The repository includes a set of Kubernetes manifests under `deploy/` that together stand up a complete DayTrader 7 environment on a cluster. The application itself is described as an `OpenLibertyApplication` custom resource managed by the [OpenLiberty Operator](https://github.com/OpenLiberty/open-liberty-operator), and the database tier is a containerized DB2 instance deployed as a standard `Deployment` with an accompanying `Service`. RBAC resources and a `Secret` round out the manifest set.
+
+<Note>
+  The `applicationImage` field in `deploy/daytrader7-deploy.yaml` currently references a pre-built image (`docker.io/dguinan/sample-daytrader7:latest`). Before deploying to your own cluster, **build your own image** using the [Docker deployment guide](/deployment/docker) and update this field to point to your registry and tag.
+</Note>
+
+## Prerequisites
+
+<CardGroup cols={3}>
+  <Card title="Kubernetes Cluster" icon="server">
+    A running cluster with `kubectl` configured. OpenShift clusters are also supported — the RBAC manifests reference OpenShift SCC roles.
+  </Card>
+  <Card title="OpenLiberty Operator" icon="brackets-curly">
+    The OpenLiberty Operator must be installed in the target namespace so the `OpenLibertyApplication` CRD is available.
+  </Card>
+  <Card title="DB2 Credentials" icon="key">
+    A DB2 password to encode into the `db-credential` Secret. The default encoded value in `db2-secret.yaml` is `passw0rd`.
+  </Card>
+</CardGroup>
+
+## Manifest inventory
+
+The `deploy/` directory contains five YAML files. Here is what each one does and its full contents:
+
+### `deploy/db2-secret.yaml` — DB2 password Secret
+
+Stores the DB2 instance password as an Opaque Kubernetes Secret. The `dbpw` key holds the base64-encoded password (`cGFzc3cwcmQ=` decodes to `passw0rd`). Update this value before applying to a production cluster.
+
+```yaml
+kind: Secret
+apiVersion: v1
+metadata:
+  name: db-credential
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+data:
+  dbpw: cGFzc3cwcmQ=
+type: Opaque
+```
+
+### `deploy/db2-role-n-sa.yaml` — RBAC Role and ServiceAccount
+
+Creates the `mysvcacct` ServiceAccount used by the DB2 pod, and a `RoleBinding` that grants both the `default` and `mysvcacct` service accounts the `system:openshift:scc:privileged` ClusterRole. This is required because the DB2 container runs as a privileged workload.
+
+```yaml
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: mysvcacct
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: 'system:openshift:scc:privileged'
+subjects:
+  - kind: ServiceAccount
+    name: default
+  - kind: ServiceAccount
+    name: mysvcacct
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: 'system:openshift:scc:privileged'
+```
+
+### `deploy/tradedb.yaml` — DB2 Deployment
+
+Deploys a single replica of the `docker.io/tamdocker/trade7db:latest` DB2 image. The `DB2INST1_PASSWORD` environment variable is sourced from the `db-credential` Secret, and the pod runs under the `mysvcacct` ServiceAccount with privileged security context.
+
+```yaml
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: trade-db2
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app: trade-db2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trade-db2
+      deployment: trade-db2
+  template:
+    metadata:
+      labels:
+        app: trade-db2
+        deployment: trade-db2
+    spec:
+      containers:
+        - resources: {}
+          terminationMessagePath: /dev/termination-log
+          name: trade-db2
+          env:
+            - name: DB2INST1_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credential
+                  key: dbpw
+            - name: LICENSE
+              value: accept
+          securityContext:
+            capabilities:
+            privileged: true
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: true
+          ports:
+            - containerPort: 50000
+              protocol: TCP
+          imagePullPolicy: Always
+          terminationMessagePolicy: File
+          image: docker.io/tamdocker/trade7db:latest
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      schedulerName: default-scheduler
+      serviceAccountName: mysvcacct
+      serviceAccount: mysvcacct
+```
+
+### `deploy/tradedb-service.yaml` — DB2 Service
+
+Exposes the DB2 pod as a `ClusterIP` Service named `trade-db2` on port `50000`. The `daytrader7-deploy.yaml` manifest sets `tradeDbHost=trade-db2`, so the application resolves the database by this Service name via cluster DNS.
+
+```yaml
+kind: Service
+apiVersion: v1
+metadata:
+  name: trade-db2
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app: trade-db2
+spec:
+  ports:
+    - name: 50000-tcp
+      protocol: TCP
+      port: 50000
+      targetPort: 50000
+  selector:
+    app: trade-db2
+    deployment: trade-db2
+  type: ClusterIP
+  sessionAffinity: None
+```
+
+### `deploy/daytrader7-deploy.yaml` — OpenLibertyApplication CR
+
+Describes the DayTrader 7 application pod using the `OpenLibertyApplication` CRD. The operator manages deployment, rolling updates, and the creation of a Route (on OpenShift) or Ingress resource at path `/daytrader`. All five DB2 connection environment variables are set here; `dbPass` is injected from the `db-credential` Secret.
+
+```yaml
+apiVersion: apps.openliberty.io/v1
+kind: OpenLibertyApplication
+metadata:
+  name: daytrader7
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  applicationImage: 'docker.io/dguinan/sample-daytrader7:latest'
+  route:
+    path: /daytrader
+  expose: true
+  service:
+    portName: liveness-port
+    port: 9443
+    type: ClusterIP
+  probes:
+    startup: {}
+    liveness: {}
+    readiness: {}
+  env:
+    - name: tradeDbHost
+      value: trade-db2
+    - name: tradeDbPort
+      value: "50000"
+    - name: tradeDbName
+      value: TRADEDB
+    - name: dbUser
+      value: db2inst1
+    - name: dbPass
+      valueFrom:
+        secretKeyRef:
+          name: db-credential
+          key: dbpw
+  pullPolicy: Always
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 500m
+      memory: 2Gi
+```
+
+#### Resource requirements
+
+| | CPU | Memory |
+|---|---|---|
+| **Requests** | `500m` | `1Gi` |
+| **Limits** | `500m` | `2Gi` |
+
+The application pod is given a hard CPU cap of half a core and up to 2 GiB of memory. Adjust these values in `daytrader7-deploy.yaml` to match your cluster capacity and benchmarking requirements.
+
+## Deployment steps
+
+Apply the manifests in dependency order. The Argo CD sync-wave annotations (`"0"` → `"3"`) reflect the intended sequence:
+
+<Steps>
+  <Step title="Create the DB2 Secret">
+    Apply the credential Secret first. If you want a different DB2 password, base64-encode it (`echo -n 'yourpassword' | base64`) and replace the `dbpw` value before applying:
+
+    ```bash
+    kubectl apply -f deploy/db2-secret.yaml
+    ```
+  </Step>
+
+  <Step title="Set up RBAC">
+    Create the `mysvcacct` ServiceAccount and the privileged RoleBinding required by the DB2 container:
+
+    ```bash
+    kubectl apply -f deploy/db2-role-n-sa.yaml
+    ```
+  </Step>
+
+  <Step title="Deploy the DB2 database">
+    Deploy the DB2 pod and its ClusterIP Service. Wait for the pod to reach `Running` before proceeding:
+
+    ```bash
+    kubectl apply -f deploy/tradedb.yaml
+    kubectl apply -f deploy/tradedb-service.yaml
+    kubectl rollout status deployment/trade-db2
+    ```
+  </Step>
+
+  <Step title="Update the application image reference">
+    Edit `deploy/daytrader7-deploy.yaml` and replace the `applicationImage` value with the image you built and pushed to your registry:
+
+    ```yaml
+    spec:
+      applicationImage: 'your-registry/sample-daytrader7:your-tag'
+    ```
+  </Step>
+
+  <Step title="Deploy DayTrader 7">
+    Apply the `OpenLibertyApplication` manifest. The OpenLiberty Operator will create the Deployment, Service, and (on OpenShift) a Route exposing the app at `/daytrader`:
+
+    ```bash
+    kubectl apply -f deploy/daytrader7-deploy.yaml
+    kubectl rollout status deployment/daytrader7
+    ```
+  </Step>
+
+  <Step title="Initialize the database">
+    Retrieve the exposed route or ingress hostname for your cluster and navigate to the configuration page:
+
+    ```
+    https://<route-hostname>/daytrader/configure.html
+    ```
+
+    Click **"(Re)-create DayTrader Database Tables and Indexes"**, then **"(Re)-populate DayTrader Database"**.
+
+    <Note>
+      After the database has been populated, restart the DayTrader 7 pod so Liberty reinitializes its connection pool cleanly:
+
+      ```bash
+      kubectl rollout restart deployment/daytrader7
+      ```
+    </Note>
+  </Step>
+</Steps>
+
+## Application exposure
+
+The `OpenLibertyApplication` CR sets `expose: true`, which instructs the operator to create a Route (OpenShift) or Ingress resource automatically. Traffic is routed to the pod's `liveness-port` at **HTTPS port 9443**, under the path `/daytrader`.
+
+<Tip>
+  The manifests include Argo CD sync-wave annotations, making them compatible with GitOps workflows out of the box. Resources are applied in wave order: ServiceAccount (wave 0) → Secret (wave 1) → DB2 Deployment and Service (wave 2) → DayTrader 7 application (wave 3).
+</Tip>

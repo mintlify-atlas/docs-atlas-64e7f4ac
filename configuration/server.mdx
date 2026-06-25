@@ -1,0 +1,296 @@
+---
+title: "Open Liberty Server Configuration for DayTrader 7"
+sidebarTitle: "Server Config"
+description: "Configure Open Liberty server.xml for DayTrader 7: HTTP ports, connection pools, JMS messaging engine, data sources, and required Java EE 7 features."
+---
+
+DayTrader 7 ships with three pre-built Open Liberty `server.xml` configurations that cover every deployment scenario from local development to multi-server load testing. All three files live in `daytrader-ee7/src/main/liberty/config/` and share an identical `featureManager` and JMS topology — the only difference between them is the database backend and, in the container variant, a handful of additional features.
+
+## Configuration files at a glance
+
+| File | Database | When to use |
+|------|----------|-------------|
+| `server.xml` | Apache Derby (embedded) | Developer quickstart — no external database needed; the pre-populated Derby store at `${shared.resource.dir}/data/tradedb` is used automatically |
+| `server_db2.xml` | External IBM DB2 (bare-metal or VM) | Performance and load testing; all DB2 connection properties are supplied via environment variables |
+| `server_db2_container.xml` | External IBM DB2 (container) | Container-based deployments; adds `mpHealth-1.0` and `transportSecurity-1.0` on top of the DB2 configuration |
+
+---
+
+## Full server.xml (Derby / default)
+
+The listing below is the verbatim content of `server.xml` as shipped in the repository.
+
+```xml
+<server>
+    <featureManager>
+        <feature>ejb-3.2</feature>
+        <feature>servlet-3.1</feature>
+        <feature>jsf-2.2</feature>
+        <feature>jpa-2.1</feature>
+        <feature>mdb-3.2</feature>
+        <feature>wasJmsServer-1.0</feature>
+        <feature>wasJmsClient-2.0</feature>
+        <feature>cdi-1.2</feature>
+        <feature>websocket-1.1</feature>
+        <feature>concurrent-1.0</feature>
+        <feature>jsonp-1.0</feature>
+        <feature>beanValidation-1.1</feature>
+        <feature>localConnector-1.0</feature>
+    </featureManager>
+
+    <!-- allow reuse of 'busy' ports for fast server recycling on linux
+         (where ports remain blocked for up to 2 mins after server stops) -->
+    <httpEndpoint host="*" httpPort="9082" httpsPort="9443" id="defaultHttpEndpoint">
+        <tcpOptions soReuseAddr="true"/>
+        <httpOptions maxKeepAliveRequests="-1"/>
+    </httpEndpoint>
+
+    <iiopEndpoint id="defaultIiopEndpoint" iiopPort="2809" iiopsPort="2810"/>
+
+    <application id="daytrader7" location="daytrader-ee7.ear" name="daytrader7"/>
+
+    <connectionManager agedTimeout="-1" connectionTimeout="0" id="conMgr1"
+                       maxIdleTime="-1" maxPoolSize="100" minPoolSize="100"
+                       purgePolicy="FailingConnectionOnly" reapTime="-1"/>
+
+    <jdbcDriver id="DerbyEmbedded" libraryRef="DerbyLib"/>
+    <library filesetRef="DerbyFileset" id="DerbyLib"/>
+    <fileset dir="${shared.resource.dir}/DerbyLibs" id="DerbyFileset"
+             includes="derby-10.14.2.0.jar"/>
+
+    <authData id="TradeDataSourceAuthData" password="db_password" user="db_username"/>
+    <authData id="TradeAdminAuthData"      password="db_password" user="db_username"/>
+
+    <dataSource connectionManagerRef="conMgr1" id="DefaultDataSource"
+                isolationLevel="TRANSACTION_READ_COMMITTED"
+                jdbcDriverRef="DerbyEmbedded" jndiName="jdbc/TradeDataSource"
+                statementCacheSize="60">
+        <properties.derby.embedded createDatabase="create"
+            databaseName="${shared.resource.dir}/data/tradedb"
+            password="db_password" user="db_username"/>
+    </dataSource>
+
+    <messagingEngine id="defaultME">
+        <queue id="TradeBrokerQueue"/>
+        <topicSpace id="TradeTopicSpace"/>
+    </messagingEngine>
+
+    <jmsQueueConnectionFactory connectionManagerRef="ConMgr3" jndiName="jms/TradeBrokerQCF">
+        <properties.wasJms/>
+    </jmsQueueConnectionFactory>
+    <connectionManager id="ConMgr3" maxPoolSize="20"/>
+
+    <jmsTopicConnectionFactory connectionManagerRef="ConMgr4" jndiName="jms/TradeStreamerTCF">
+        <properties.wasJms/>
+    </jmsTopicConnectionFactory>
+    <connectionManager id="ConMgr4" maxPoolSize="20"/>
+
+    <jmsQueue id="jms/TradeBrokerQueue" jndiName="jms/TradeBrokerQueue">
+        <properties.wasJms deliveryMode="NonPersistent" queueName="TradeBrokerQueue"/>
+    </jmsQueue>
+
+    <jmsTopic id="TradeStreamerTopic" jndiName="jms/TradeStreamerTopic">
+        <properties.wasJms deliveryMode="NonPersistent" topicSpace="TradeTopicSpace"/>
+    </jmsTopic>
+
+    <jmsActivationSpec id="eis/TradeBrokerMDB">
+        <properties.wasJms destinationRef="jms/TradeBrokerQueue"/>
+    </jmsActivationSpec>
+
+    <jmsActivationSpec id="eis/TradeStreamerMDB">
+        <properties.wasJms destinationRef="TradeStreamerTopic"
+                           destinationType="javax.jms.Topic"/>
+    </jmsActivationSpec>
+</server>
+```
+
+---
+
+## Key sections explained
+
+### featureManager
+
+Liberty's feature system loads only the capabilities the application actually needs. DayTrader 7 requires exactly 13 features:
+
+| Feature | Purpose |
+|---------|---------|
+| `ejb-3.2` | Stateless and message-driven EJBs (Java EE 7 EJB Full profile) — hosts `TradeSLSBBean` and the order MDBs |
+| `servlet-3.1` | HTTP Servlet container for `TradeAppServlet`, `TradeConfigServlet`, and `TradeScenarioServlet` |
+| `jsf-2.2` | JavaServer Faces for the market-summary UI built with `.xhtml` Facelets |
+| `jpa-2.1` | JPA entity persistence for `AccountDataBean`, `QuoteDataBean`, `OrderDataBean`, `HoldingDataBean`, and `AccountProfileDataBean` |
+| `mdb-3.2` | Message-Driven Bean support for `DTBroker3MDB` (order processing) and `TradeStreamerMDB` (WebSocket price push) |
+| `wasJmsServer-1.0` | Embedded Liberty JMS messaging engine — hosts `TradeBrokerQueue` and `TradeTopicSpace` in-process |
+| `wasJmsClient-2.0` | JMS client API used by the application to send to the queue and publish to the topic |
+| `cdi-1.2` | Contexts and Dependency Injection; provides `@Inject` across the web and EJB tiers |
+| `websocket-1.1` | JSR-356 WebSocket endpoint (`TradeWebsocket`) that streams live quote price changes to browser clients |
+| `concurrent-1.0` | JSR-236 Managed Threads used by the `Async_ManagedThread` order-processing mode |
+| `jsonp-1.0` | JSON-P streaming API used when constructing the market-summary JSON payload |
+| `beanValidation-1.1` | JSR-349 Bean Validation applied to JPA entity constraints |
+| `localConnector-1.0` | Enables JMX-based local connection for `server status` and `server dump` tooling |
+
+<Tip>
+  The container config (`server_db2_container.xml`) adds two further features on top of this baseline: `mpHealth-1.0` (MicroProfile Health `/health` endpoint for container liveness probes) and `transportSecurity-1.0` (TLS/SSL activation for the HTTPS endpoint).
+</Tip>
+
+---
+
+### httpEndpoint
+
+```xml
+<httpEndpoint host="*" httpPort="9082" httpsPort="9443" id="defaultHttpEndpoint">
+    <tcpOptions soReuseAddr="true"/>
+    <httpOptions maxKeepAliveRequests="-1"/>
+</httpEndpoint>
+```
+
+| Attribute | Value | Meaning |
+|-----------|-------|---------|
+| `host` | `*` | Listen on all network interfaces |
+| `httpPort` | `9082` | Plain HTTP — primary benchmark port |
+| `httpsPort` | `9443` | TLS — active when `transportSecurity-1.0` is loaded |
+| `soReuseAddr` | `true` | Allows the OS to immediately rebind the port after a server stop |
+| `maxKeepAliveRequests` | `-1` | Unlimited keep-alive requests per connection (no forced reconnect overhead) |
+
+<Note>
+  `soReuseAddr="true"` is critical for benchmarking on Linux. Without it, the OS holds the port in `TIME_WAIT` for up to two minutes after a server stop, causing `address already in use` errors on rapid restarts between measurement runs.
+</Note>
+
+An `iiopEndpoint` is also declared on ports `2809` (IIOP) and `2810` (IIOP/TLS) to support the optional remote EJB interface invocation path.
+
+---
+
+### connectionManager (database pool)
+
+```xml
+<connectionManager agedTimeout="-1" connectionTimeout="0" id="conMgr1"
+                   maxIdleTime="-1" maxPoolSize="100" minPoolSize="100"
+                   purgePolicy="FailingConnectionOnly" reapTime="-1"/>
+```
+
+| Attribute | Value | Effect |
+|-----------|-------|--------|
+| `maxPoolSize` | `100` | Hard ceiling on concurrent database connections |
+| `minPoolSize` | `100` | Pool is pre-filled to 100 connections at startup — avoids ramp-up latency during benchmarks |
+| `agedTimeout` | `-1` | Connections are never retired due to age |
+| `maxIdleTime` | `-1` | Idle connections are never evicted |
+| `connectionTimeout` | `0` | Requests for a connection block without timeout (wait indefinitely) |
+| `reapTime` | `-1` | The pool reaper thread is disabled |
+| `purgePolicy` | `FailingConnectionOnly` | On a connection error, only the failing connection is removed — the rest of the pool stays intact |
+
+Setting every timeout to `-1` gives maximum throughput at the cost of resource reclamation. This profile is designed for sustained load tests where the pool should stay fully warm for the entire run duration.
+
+---
+
+### jdbcDriver and dataSource (Derby)
+
+```xml
+<jdbcDriver id="DerbyEmbedded" libraryRef="DerbyLib"/>
+<library filesetRef="DerbyFileset" id="DerbyLib"/>
+<fileset dir="${shared.resource.dir}/DerbyLibs" id="DerbyFileset"
+         includes="derby-10.14.2.0.jar"/>
+
+<authData id="TradeDataSourceAuthData" password="db_password" user="db_username"/>
+
+<dataSource connectionManagerRef="conMgr1" id="DefaultDataSource"
+            isolationLevel="TRANSACTION_READ_COMMITTED"
+            jdbcDriverRef="DerbyEmbedded" jndiName="jdbc/TradeDataSource"
+            statementCacheSize="60">
+    <properties.derby.embedded createDatabase="create"
+        databaseName="${shared.resource.dir}/data/tradedb"
+        password="db_password" user="db_username"/>
+</dataSource>
+```
+
+Key settings:
+
+- **JNDI name** — `jdbc/TradeDataSource` — looked up in application code via `java:comp/env/jdbc/TradeDataSource`.
+- **`isolationLevel`** — `TRANSACTION_READ_COMMITTED` balances consistency with concurrency; avoids dirty reads while allowing non-repeatable reads under concurrent workloads.
+- **`statementCacheSize`** — `60` prepared statements are cached per connection (100 connections × 60 = up to 6,000 cached plans), minimising parse overhead under repeated workloads.
+- **`createDatabase="create"`** — Derby will create the database directory at `${shared.resource.dir}/data/tradedb` on first use if it does not already exist.
+
+For the DB2 variants (`server_db2.xml` / `server_db2_container.xml`) the `jdbcDriver` block references `db2jcc4.jar` from `${shared.resource.dir}/db2jars`, and the `dataSource` uses environment-variable substitution for host, port, database name, and credentials:
+
+```xml
+<dataSource jndiName="jdbc/TradeDataSource" jdbcDriverRef="DB2JCC"
+            id="DefaultDataSource" connectionManagerRef="conMgr1"
+            statementCacheSize="60" isolationLevel="TRANSACTION_READ_COMMITTED"
+            type="javax.sql.ConnectionPoolDataSource">
+    <properties serverName="${tradeDbHost}" portNumber="${tradeDbPort}"
+                databaseName="${tradeDbName}" driverType="4"
+                user="${dbUser}" password="${dbPass}"/>
+</dataSource>
+```
+
+---
+
+### messagingEngine
+
+```xml
+<messagingEngine id="defaultME">
+    <queue id="TradeBrokerQueue"/>
+    <topicSpace id="TradeTopicSpace"/>
+</messagingEngine>
+```
+
+The Liberty embedded JMS broker (`wasJmsServer-1.0`) hosts two destinations:
+
+- **`TradeBrokerQueue`** — point-to-point queue consumed by `DTBroker3MDB`. Used in the `Async_2-Phase` and `Async_ManagedThread` order processing modes.
+- **`TradeTopicSpace`** — publish/subscribe topic space. Quote price-change events are published here by `TradeSLSBBean.publishQuotePriceChange()` and consumed by `TradeStreamerMDB`, which forwards the payload to WebSocket clients.
+
+---
+
+### JMS connection factories and destinations
+
+<Accordion title="Queue connection factory — TradeBrokerQCF">
+
+```xml
+<jmsQueueConnectionFactory connectionManagerRef="ConMgr3" jndiName="jms/TradeBrokerQCF">
+    <properties.wasJms/>
+</jmsQueueConnectionFactory>
+<connectionManager id="ConMgr3" maxPoolSize="20"/>
+
+<jmsQueue id="jms/TradeBrokerQueue" jndiName="jms/TradeBrokerQueue">
+    <properties.wasJms deliveryMode="NonPersistent" queueName="TradeBrokerQueue"/>
+</jmsQueue>
+```
+
+`jms/TradeBrokerQCF` is the `QueueConnectionFactory` used to send order messages. `deliveryMode="NonPersistent"` means messages are held in memory only — they are lost on server restart but avoid the write amplification of persistent messaging, which suits benchmark workloads.
+
+</Accordion>
+
+<Accordion title="Topic connection factory — TradeStreamerTCF">
+
+```xml
+<jmsTopicConnectionFactory connectionManagerRef="ConMgr4" jndiName="jms/TradeStreamerTCF">
+    <properties.wasJms/>
+</jmsTopicConnectionFactory>
+<connectionManager id="ConMgr4" maxPoolSize="20"/>
+
+<jmsTopic id="TradeStreamerTopic" jndiName="jms/TradeStreamerTopic">
+    <properties.wasJms deliveryMode="NonPersistent" topicSpace="TradeTopicSpace"/>
+</jmsTopic>
+```
+
+`jms/TradeStreamerTCF` is the `TopicConnectionFactory` used to publish quote price-change events into `TradeTopicSpace`.
+
+</Accordion>
+
+<Accordion title="JMS activation specs (MDB wiring)">
+
+```xml
+<jmsActivationSpec id="eis/TradeBrokerMDB">
+    <properties.wasJms destinationRef="jms/TradeBrokerQueue"/>
+</jmsActivationSpec>
+
+<jmsActivationSpec id="eis/TradeStreamerMDB">
+    <properties.wasJms destinationRef="TradeStreamerTopic"
+                       destinationType="javax.jms.Topic"/>
+</jmsActivationSpec>
+```
+
+Activation specs wire MDB classes to their JMS destinations without requiring any code-level configuration:
+
+- `eis/TradeBrokerMDB` — activates `DTBroker3MDB`, which dequeues order messages from `TradeBrokerQueue` and completes them via JPA.
+- `eis/TradeStreamerMDB` — activates `TradeStreamerMDB`, which receives price-change topic messages and pushes them to WebSocket sessions via `TradeWebsocket`.
+
+</Accordion>

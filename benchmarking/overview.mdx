@@ -1,0 +1,260 @@
+---
+title: "Benchmarking with DayTrader 7: Setup and Best Practices"
+sidebarTitle: "Overview"
+description: "Learn how to set up a repeatable DayTrader 7 benchmark run: three-machine topology, DB2 tuning, warm-up runs, and database reset between measurements."
+---
+
+DayTrader 7 is designed first and foremost as a performance benchmark tool. Raw throughput numbers are only meaningful when the environment is controlled: resource contention from a co-located database or load driver will skew results, an untuned DB2 instance will bottleneck before the JVM does, and an un-warmed JIT compiler will make the first measurement run look worse than subsequent ones. Producing credible, repeatable numbers requires a dedicated three-machine topology, DB2 (not the embedded Derby instance), specific server tuning, and a disciplined run procedure.
+
+## Benchmark topology
+
+Separate your benchmark environment across three dedicated machines to avoid cross-component resource contention:
+
+| Machine | Role |
+|---|---|
+| **Open Liberty machine** | Runs the DayTrader application server (Open Liberty) |
+| **DB2 machine** | Runs the IBM DB2 database (`tradedb`) |
+| **Driver machine** | Runs Apache JMeter and the WebSocket Samplers plugin |
+
+Keeping these roles on separate hosts is critical. If the database and the application server share a machine, disk I/O and CPU for DB2 competes directly with the JVM and HTTP acceptors — the result is a measurement of resource contention, not application throughput. Similarly, running JMeter on the same host as the application server means the load driver's own thread scheduling affects the numbers.
+
+## Pre-benchmark checklist
+
+Complete every step below **once**, before your first measurement run. The database backup created in step 6 is restored before each subsequent server start.
+
+<Steps>
+  <Step title="Build the application">
+    Clone or download the repository, then build from the project root:
+
+    ```bash
+    git clone git@github.com:WASdev/sample.daytrader7.git
+    cd sample.daytrader7
+    mvn clean install
+    ```
+
+    This produces `daytrader-ee7/target/daytrader-ee7.ear`. Copy it to your Liberty server's apps directory:
+
+    ```bash
+    cp daytrader-ee7/target/daytrader-ee7.ear \
+      <OPENLIBERTY_HOME>/usr/servers/defaultServer/apps/
+    ```
+  </Step>
+
+  <Step title="Configure Open Liberty with DB2">
+    Copy the DB2-ready server configuration (overwriting the default `server.xml`):
+
+    ```bash
+    cp daytrader-ee7/src/main/liberty/config/server_db2.xml \
+      <OPENLIBERTY_HOME>/usr/servers/defaultServer/server.xml
+    ```
+
+    Set the following environment variables so Liberty can reach your DB2 instance, or hard-code them directly in `server.xml`:
+
+    ```bash
+    export dbUser=<db2-username>
+    export dbPass=<db2-password>
+    export tradeDbHost=<db2-hostname>
+    export tradeDbPort=<db2-port>
+    export tradeDbName=tradedb
+    ```
+  </Step>
+
+  <Step title="Copy DB2 JDBC drivers">
+    Copy the DB2 JDBC JAR files from the DB2 machine to the Liberty shared resources directory. Both JARs are required:
+
+    ```
+    db2jcc4.jar
+    db2jcc_license_cu.jar
+    ```
+
+    Place them in:
+
+    ```
+    <OPENLIBERTY_HOME>/usr/shared/db2jars/
+    ```
+
+    This path matches the `<fileset dir="${shared.resource.dir}/db2jars" ...>` element in `server_db2.xml`.
+  </Step>
+
+  <Step title="Set JVM heap options">
+    Create `<OPENLIBERTY_HOME>/usr/servers/defaultServer/jvm.options` and add at minimum:
+
+    ```
+    -Xms1024m
+    -Xmx1024m
+    ```
+
+    Setting the initial and maximum heap to the same value eliminates GC-driven heap growth events during a measurement window.
+  </Step>
+
+  <Step title="Create the database and initialize data">
+    On the DB2 machine, sign in as the `db2` user and create the database. If `DB2_APM_PERFORMANCE` is enabled you will encounter error `SQL1803N` — disable it first:
+
+    ```bash
+    db2set DB2_APM_PERFORMANCE=
+    db2stop
+    db2start
+    db2 create db tradedb
+    ```
+
+    Start Open Liberty, then navigate to the configuration page in a browser:
+
+    ```
+    http://<openliberty-hostname>:9082/daytrader/configure.html
+    ```
+
+    Click **"(Re)-create DayTrader Database Tables and Indexes"**, then click **"(Re)-populate DayTrader Database"**. This creates 15,000 users (`uid:0` – `uid:14999`) and 10,000 stock symbols (`s:0` – `s:9999`).
+
+    Once population is complete, stop Liberty:
+
+    ```bash
+    <OPENLIBERTY_HOME>/bin/server stop
+    ```
+  </Step>
+
+  <Step title="Create a DB2 backup after population">
+    On the DB2 machine, save a clean snapshot of the populated database. This backup is the baseline that you restore before every measurement run:
+
+    ```bash
+    mkdir -p ~/backups/tradedb
+    db2 backup db tradedb to ~/backups/tradedb
+    ```
+
+    <Note>
+      If disk I/O becomes a bottleneck during restore, consider creating a RAM disk and restoring the database onto it. Fast restore latency matters because it directly gates how quickly you can cycle between runs.
+    </Note>
+  </Step>
+
+  <Step title="Apply DB2 performance tuning">
+    Put the following into a script (e.g., `backupTradeDB.sh`) and run it as the `db2` user. It applies recommended performance settings and then creates the backup from step 6:
+
+    ```bash
+    DB=tradedb
+    mkdir -p ~/backups/${DB}
+
+    db2 update dbm cfg using notifylevel 0
+    db2 update dbm cfg using diaglevel 1
+    db2 update dbm cfg using NUM_POOLAGENTS 500 automatic \
+                               MAX_COORDAGENTS 500 automatic \
+                               MAX_CONNECTIONS 500 automatic
+
+    db2 -v update db cfg for ${DB} using MAXLOCKS 100 LOCKLIST 100000
+
+    db2 connect to ${DB}
+    db2 update db cfg for ${DB} using maxappls 500 automatic
+    db2 update db cfg for ${DB} using logfilsiz 8000
+    db2 update db cfg for ${DB} using logprimary 32
+    db2 update db cfg for ${DB} using dft_queryopt 0
+    db2 update db cfg for ${DB} using softmax 3000
+    db2 update db cfg for ${DB} using chngpgs_thresh 99
+
+    db2 -v alter bufferpool IBMDEFAULTBP size -1
+    db2 -v connect reset
+    db2 -v update db cfg for ${DB} using BUFFPAGE 262144
+
+    db2set DB2_APM_PERFORMANCE=ON
+    db2set DB2_KEEPTABLELOCK=CONNECTION
+    db2set DB2_USE_ALTERNATE_PAGE_CLEANING=ON
+    db2set DB2_MINIMIZE_LISTPREFETCH=YES
+    db2set DB2_LOGGER_NON_BUFFERED_IO=OFF
+
+    db2 connect reset
+    db2 terminate
+    db2stop force
+    db2start
+
+    db2 connect to ${DB}
+    db2 reorgchk update statistics
+    db2 connect reset
+    db2 terminate
+
+    db2 backup db tradedb to ~/backups/${DB}
+    ```
+
+    Key settings and their rationale:
+
+    | Parameter | Value | Purpose |
+    |---|---|---|
+    | `LOCKLIST` | `100000` | Enlarges the lock list to reduce lock escalation under high concurrency |
+    | `LOGFILSIZ` | `8000` | Large log files reduce I/O frequency during write-heavy workloads |
+    | `BUFFPAGE` | `262144` | Maximizes the buffer pool to keep more data pages in memory |
+    | `MAXLOCKS` | `100` | Percentage of lock list a single application can consume before escalation |
+    | `NUM_POOLAGENTS` | `500` | Sufficient agent pool for 100+ Liberty connection pool threads |
+    | `DB2_KEEPTABLELOCK` | `CONNECTION` | Reduces row-level lock overhead for DayTrader's update-heavy pattern |
+  </Step>
+
+  <Step title="Stop Liberty — ready for measurement runs">
+    Ensure Liberty is stopped before beginning the run procedure below. Each measurement run starts with a database restore followed by a fresh Liberty start.
+
+    ```bash
+    <OPENLIBERTY_HOME>/bin/server stop
+    ```
+  </Step>
+</Steps>
+
+## Run procedure
+
+Follow this sequence for every measurement session. The database restore ensures that each run starts from an identical data state, which is essential for comparing results across different configuration options.
+
+**Before each server start**, restore the database on the DB2 machine as the `db2` user:
+
+```bash
+db2stop force
+db2start
+db2 restore db tradedb from ~/backups/tradedb replace existing
+```
+
+Then start Liberty:
+
+```bash
+<OPENLIBERTY_HOME>/bin/server start
+```
+
+**Warm-up:** Run three 180-second warm-up passes with JMeter before taking any measurements. The warm-up allows the JVM's JIT compiler to compile and optimize all DayTrader code paths. Approximately 3,000 iterations through each code path is sufficient for JIT stabilization. Without warm-up, the first measurement window will understate throughput.
+
+**Measurement:** Run three 180-second measurement passes, with a 30-second break between each. Record throughput from these runs only.
+
+**Database reset between runs:** Between each measurement pass, reset the DayTrader runtime to remove newly registered users and return orders to a consistent state. This prevents database growth from artificially deflating throughput on later runs:
+
+```
+http://<openliberty-hostname>:9082/daytrader/config?action=resetTrade
+```
+
+<Note>
+  The reset removes all users registered during the run (those with the `ru:` prefix) and marks outstanding orders as completed. Skipping the reset means successive runs operate on a progressively larger database, making results non-comparable.
+</Note>
+
+## Key configuration parameters
+
+These parameters, set via the DayTrader configuration page or `server.xml`, have the largest effect on benchmark results. Change only one at a time when comparing measurements.
+
+| Parameter | Options / Value | Effect |
+|---|---|---|
+| `runTimeMode` | `EJB3` (default) \| `Direct (JDBC)` | Selects whether trading operations use the EJB 3 container or bypass it with direct JDBC and JMS code. `Direct` mode isolates the JDBC/JMS path; `EJB3` exercises the full EJB container stack. |
+| `orderProcessingMode` | `Sync` \| `Async_2-Phase` \| `Async_ManagedThread` | Controls how stock buy/sell orders are completed. `Sync` completes orders immediately in the request thread. `Async_2-Phase` queues orders to `TradeBrokerMDB` with a two-phase commit over EJB and JMS. `Async_ManagedThread` uses the Java EE 7 Concurrency Utilities `ManagedThreadFactory`. |
+| `maxPoolSize` | `100` (in `server.xml`) | JDBC connection pool size for the `TradeDataSource`. Set equal to or higher than the JMeter thread count to avoid connection wait time masking application throughput. |
+| `maxKeepAliveRequests` | `-1` (unlimited, in `server.xml`) | Allows HTTP keep-alive connections to persist indefinitely, avoiding TCP handshake overhead per request during a JMeter run. |
+
+The `server_db2.xml` ships with `maxPoolSize=100` and `maxKeepAliveRequests=-1` already configured:
+
+```xml
+<connectionManager agedTimeout="-1" connectionTimeout="0" id="conMgr1"
+    maxIdleTime="-1" maxPoolSize="100" minPoolSize="100"
+    purgePolicy="FailingConnectionOnly" reapTime="-1" />
+
+<httpEndpoint host="*" httpPort="9082" httpsPort="9443" id="defaultHttpEndpoint">
+    <tcpOptions soReuseAddr="true" />
+    <httpOptions maxKeepAliveRequests="-1" />
+</httpEndpoint>
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="JMeter Load Testing" icon="gauge" href="/benchmarking/jmeter">
+    Configure the DayTrader JMeter test plans, set command-line parameters, and enable real-time output.
+  </Card>
+  <Card title="Web Primitives" icon="flask" href="/benchmarking/web-primitives">
+    Isolate individual Java EE component performance with DayTrader's built-in micro-benchmark servlets.
+  </Card>
+</CardGroup>

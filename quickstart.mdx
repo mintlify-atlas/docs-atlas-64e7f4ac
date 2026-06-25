@@ -1,47 +1,103 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with DayTrader 7 on Open Liberty"
+sidebarTitle: "Quickstart"
+description: "Build and run DayTrader 7 locally on Open Liberty with embedded Derby in under five minutes using Maven."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+DayTrader 7 runs on Open Liberty with an embedded Apache Derby database for zero-configuration local development. The Maven build downloads Open Liberty automatically, packages the application as an EAR, and deploys it to an embedded Liberty server — so you need nothing beyond a JDK, Maven, and Git to get a fully functional trading application running on your workstation.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+<Note>
+**Prerequisites**
+- **JDK 8 or later** — required by the Maven compiler plugin (`maven.compiler.source=1.8`)
+- **Maven 3.x** — used for building the multi-module project and driving the Liberty server
+- **Git** — to clone the repository
+</Note>
 
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+## Getting Up and Running
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the repository">
+    Clone the DayTrader 7 repository from GitHub and change into the project directory:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/WASdev/sample.daytrader7.git
+    cd sample.daytrader7
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Build with Maven">
+    Run `mvn install` from the root of the repository. This command builds all three modules (`daytrader-ee7-ejb`, `daytrader-ee7-web`, and `daytrader-ee7`) in order, producing the final EAR artifact and downloading the Open Liberty runtime into the `daytrader-ee7/target/liberty/` directory:
 
     ```bash
-    your-cli init
+    mvn install
+    ```
+
+    The build resolves all dependencies — including the embedded Apache Derby JDBC driver — from Maven Central. No manual Liberty installation is required.
+  </Step>
+
+  <Step title="Start the server">
+    Change into the EAR module and start the embedded Liberty server using the `liberty:run` goal. The server starts in the foreground and listens on port **9082**:
+
+    ```bash
+    cd daytrader-ee7
+    mvn liberty:run
+    ```
+
+    Watch the console output for the message `The daytrader-ee7 server is ready to run a smarter planet.` before proceeding.
+
+    The application is available at [http://localhost:9082/daytrader](http://localhost:9082/daytrader).
+  </Step>
+
+  <Step title="Initialize the database">
+    Open a browser and navigate to the database management page:
+
+    ```
+    http://localhost:9082/daytrader/configure.html
+    ```
+
+    Perform these two steps in order:
+
+    1. Click **(Re)-create DayTrader Database Tables and Indexes** — this creates the schema in the embedded Derby database.
+    2. Click **(Re)-populate DayTrader Database** — this seeds the database with the default set of users, stock quotes, accounts, and holdings required for the benchmark workload.
+  </Step>
+
+  <Step title="Restart the server">
+    A server restart is required after the initial database population so that the application picks up the newly seeded data correctly.
+
+    Return to the terminal where `mvn liberty:run` is running and stop the server with **Ctrl+C**, then start it again:
+
+    ```bash
+    mvn liberty:run
     ```
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
+  <Step title="Access the application">
+    Open your browser and navigate to the main trading interface:
+
     ```
+    http://localhost:9082/daytrader
+    ```
+
+    Log in with the default pre-seeded credentials:
+
+    - **User ID:** `uid:0`
+    - **Password:** `xxx`
+
+    You should see the DayTrader home page with the market summary, your portfolio, and navigation to quotes, orders, and account settings.
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Application URLs
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+Once the server is running and the database is initialised, the following URLs are available:
+
+| URL | Description |
+|-----|-------------|
+| `/daytrader` | Main trading interface — home page, portfolio, quotes, buy/sell |
+| `/daytrader/scenario` | Benchmark workload scenario driver — simulates user actions for load testing |
+| `/daytrader/config` | Runtime configuration page — switch runtime mode, order processing mode, and other parameters |
+| `/daytrader/configure.html` | Database management page — create schema, populate data, and reset benchmark statistics |
+
+<Tip>
+Ready to run a performance benchmark? Head to the [Benchmarking section](/benchmarking/overview) to learn how to configure Apache JMeter with the DayTrader scenario driver, interpret run statistics from `/daytrader/config`, and tune Liberty server settings for maximum throughput.
 </Tip>

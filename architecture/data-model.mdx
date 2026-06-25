@@ -1,0 +1,452 @@
+---
+title: "DayTrader 7 JPA Data Model and Database Schema"
+sidebarTitle: "Data Model"
+description: "Explore DayTrader 7's five JPA entities — Account, AccountProfile, Quote, Holding, and Order — with their fields, relationships, and SQL schema."
+---
+
+DayTrader 7 uses five JPA 2.1 entities mapped to relational database tables within the `daytrader` persistence unit (configured in `daytrader-ee7-ejb/src/main/resources/META-INF/persistence.xml`, using the `jdbc/TradeDataSource` JTA data source). Every table includes an `optLock` integer column that JPA uses for optimistic locking to guard against lost updates under concurrent trading load. The DDL for all tables is provided in `daytrader-ee7-ejb/src/main/resources/META-INF/daytrader.sql`. Primary keys for `AccountDataBean`, `HoldingDataBean`, and `OrderDataBean` are generated using a shared table-based generator (`KEYGENEJB`), avoiding database-sequence contention.
+
+<Note>
+The JPA shared second-level cache is explicitly disabled (`<shared-cache-mode>NONE</shared-cache-mode>`) so that every read goes to the database, producing a more representative benchmark workload and ensuring all five entities are exercised on every transaction.
+</Note>
+
+---
+
+## Entity: AccountDataBean
+
+**Table:** `accountejb`  
+**Java class:** `com.ibm.websphere.samples.daytrader.entities.AccountDataBean`
+
+`AccountDataBean` represents a customer's brokerage account. It is the root aggregate for orders and holdings. The `profile_userid` column is a foreign key to `accountprofileejb`, linking each account to its profile. Login and logout activity increments `loginCount` and `logoutCount` directly on the entity, making these counters useful benchmark metrics.
+
+```java
+@Entity(name = "accountejb")
+@Table(name = "accountejb")
+public class AccountDataBean implements Serializable {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.TABLE, generator = "accountIdGen")
+    @Column(name = "ACCOUNTID", nullable = false)
+    private Integer accountID;
+
+    @Column(name = "LOGINCOUNT", nullable = false)
+    private int loginCount;
+
+    @Column(name = "LOGOUTCOUNT", nullable = false)
+    private int logoutCount;
+
+    @Column(name = "LASTLOGIN")
+    @Temporal(TemporalType.TIMESTAMP)
+    private Date lastLogin;
+
+    @Column(name = "CREATIONDATE")
+    @Temporal(TemporalType.TIMESTAMP)
+    private Date creationDate;
+
+    @Column(name = "BALANCE")
+    private BigDecimal balance;
+
+    @Column(name = "OPENBALANCE")
+    private BigDecimal openBalance;
+
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "PROFILE_USERID")
+    private AccountProfileDataBean profile;
+
+    @OneToMany(mappedBy = "account", fetch = FetchType.LAZY)
+    private Collection<OrderDataBean> orders;
+
+    @OneToMany(mappedBy = "account", fetch = FetchType.LAZY)
+    private Collection<HoldingDataBean> holdings;
+}
+```
+
+**SQL DDL:**
+
+```sql
+create table accountejb
+  (creationdate timestamp,
+   openbalance decimal(10, 2),
+   logoutcount integer not null,
+   balance decimal(10, 2),
+   accountid integer not null,
+   lastlogin timestamp,
+   logincount integer not null,
+   PROFILE_USERID VARCHAR(250),
+   optLock integer);
+
+alter table accountejb
+  add constraint pk_accountejb primary key (accountid);
+
+create index profile_userid on accountejb(profile_userid);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `ACCOUNTID` | `integer` | Primary key; generated via `KEYGENEJB` table |
+| `LOGINCOUNT` | `integer NOT NULL` | Incremented on every successful login |
+| `LOGOUTCOUNT` | `integer NOT NULL` | Incremented on every logout |
+| `LASTLOGIN` | `timestamp` | Updated to `NOW()` on each login |
+| `CREATIONDATE` | `timestamp` | Set at account registration |
+| `BALANCE` | `decimal(10,2)` | Current cash balance; debited on buy, credited on sell |
+| `OPENBALANCE` | `decimal(10,2)` | Initial deposit balance; never modified after registration |
+| `PROFILE_USERID` | `varchar(250)` | FK → `accountprofileejb.userid` |
+| `optLock` | `integer` | JPA optimistic-lock version column |
+
+**Relationships:**
+- `@OneToOne` (lazy) → `AccountProfileDataBean` via `PROFILE_USERID`
+- `@OneToMany` (lazy, mapped by `account`) → `Collection<OrderDataBean>`
+- `@OneToMany` (lazy, mapped by `account`) → `Collection<HoldingDataBean>`
+
+---
+
+## Entity: AccountProfileDataBean
+
+**Table:** `accountprofileejb`  
+**Java class:** `com.ibm.websphere.samples.daytrader.entities.AccountProfileDataBean`
+
+`AccountProfileDataBean` stores the user's identifying and contact information. The `userid` field is both the natural primary key and the lookup key used throughout the application (e.g., `entityManager.find(AccountProfileDataBean.class, userID)`). Passwords are stored in plain text as this is a benchmark application, not a production system.
+
+```java
+@Entity(name = "accountprofileejb")
+@Table(name = "accountprofileejb")
+public class AccountProfileDataBean implements Serializable {
+
+    @Id
+    @Column(name = "USERID", nullable = false)
+    private String userID;
+
+    @Column(name = "PASSWD")
+    private String passwd;
+
+    @Column(name = "FULLNAME")
+    private String fullName;
+
+    @Column(name = "ADDRESS")
+    private String address;
+
+    @Column(name = "EMAIL")
+    private String email;
+
+    @Column(name = "CREDITCARD")
+    private String creditCard;
+
+    @OneToOne(mappedBy = "profile", fetch = FetchType.LAZY)
+    private AccountDataBean account;
+}
+```
+
+**SQL DDL:**
+
+```sql
+create table accountprofileejb
+  (address varchar(250),
+   passwd varchar(250),
+   userid varchar(250) not null,
+   email varchar(250),
+   creditcard varchar(250),
+   fullname varchar(250),
+   optLock integer);
+
+alter table accountprofileejb
+  add constraint pk_accountprofile2 primary key (userid);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `USERID` | `varchar(250) NOT NULL` | Primary key; used as the application-level user identity |
+| `PASSWD` | `varchar(250)` | Password (plain text; benchmark only) |
+| `FULLNAME` | `varchar(250)` | Customer's full name |
+| `ADDRESS` | `varchar(250)` | Street address |
+| `EMAIL` | `varchar(250)` | Email address |
+| `CREDITCARD` | `varchar(250)` | Credit card number used during registration |
+| `optLock` | `integer` | JPA optimistic-lock version column |
+
+**Relationships:**
+- `@OneToOne` (lazy, inverse side, mapped by `profile`) → `AccountDataBean`
+
+---
+
+## Entity: QuoteDataBean
+
+**Table:** `quoteejb`  
+**Java class:** `com.ibm.websphere.samples.daytrader.entities.QuoteDataBean`
+
+`QuoteDataBean` represents a publicly traded stock. The `symbol` (e.g., `"s:0"` through `"s:9999"`) is the natural primary key. After every buy or sell, `TradeSLSBBean.updateQuotePriceVolume()` issues a `SELECT ... FOR UPDATE` (via the named native query `quoteejb.quoteForUpdate`) and updates `price`, `change1`, `high`, `low`, and `volume` atomically. These updates are then published to `TradeStreamerTopic` for real-time WebSocket delivery.
+
+```java
+@Entity(name = "quoteejb")
+@Table(name = "quoteejb")
+@NamedQueries({
+    @NamedQuery(name = "quoteejb.allQuotes", query = "SELECT q FROM quoteejb q")
+})
+@NamedNativeQueries({
+    @NamedNativeQuery(name = "quoteejb.quoteForUpdate",
+        query = "select * from quoteejb q where q.symbol=? for update",
+        resultClass = QuoteDataBean.class)
+})
+public class QuoteDataBean implements Serializable {
+
+    @Id
+    @Column(name = "SYMBOL", nullable = false)
+    private String symbol;
+
+    @Column(name = "COMPANYNAME")
+    private String companyName;
+
+    @Column(name = "VOLUME", nullable = false)
+    private double volume;
+
+    @Column(name = "PRICE")
+    private BigDecimal price;
+
+    @Column(name = "OPEN1")
+    private BigDecimal open1;
+
+    @Column(name = "LOW")
+    private BigDecimal low;
+
+    @Column(name = "HIGH")
+    private BigDecimal high;
+
+    @Column(name = "CHANGE1", nullable = false)
+    private double change1;
+}
+```
+
+**SQL DDL:**
+
+```sql
+create table quoteejb
+  (low decimal(10, 2),
+   open1 decimal(10, 2),
+   volume double not null,
+   price decimal(10, 2),
+   high decimal(10, 2),
+   companyname varchar(250),
+   symbol varchar(250) not null,
+   change1 double not null,
+   optLock integer);
+
+alter table quoteejb
+  add constraint pk_quoteejb primary key (symbol);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `SYMBOL` | `varchar(250) NOT NULL` | Primary key; format `"s:N"` where N is 0–9999 |
+| `COMPANYNAME` | `varchar(250)` | Display name of the company |
+| `VOLUME` | `double NOT NULL` | Cumulative shares traded; incremented on each buy/sell |
+| `PRICE` | `decimal(10,2)` | Current market price; updated on each trade |
+| `OPEN1` | `decimal(10,2)` | Price at market open; used to compute `change1` |
+| `LOW` | `decimal(10,2)` | Intraday low |
+| `HIGH` | `decimal(10,2)` | Intraday high |
+| `CHANGE1` | `double NOT NULL` | `price − open1`; updated on each trade |
+| `optLock` | `integer` | JPA optimistic-lock version column |
+
+**Relationships:**  
+Referenced (as the `quote` side) by `@ManyToOne` from `HoldingDataBean` and `OrderDataBean`. No back-reference is stored in `QuoteDataBean` itself.
+
+---
+
+## Entity: HoldingDataBean
+
+**Table:** `holdingejb`  
+**Java class:** `com.ibm.websphere.samples.daytrader.entities.HoldingDataBean`
+
+`HoldingDataBean` represents a position in a stock that a customer currently owns. A holding is created by `TradeSLSBBean.completeOrder()` when a buy order is completed, and is removed (`entityManager.remove(holding)`) when a sell order is completed. Setting `purchaseDate` to `Timestamp(0)` marks a holding as "in-flight" (pending sale).
+
+```java
+@Entity(name = "holdingejb")
+@Table(name = "holdingejb")
+public class HoldingDataBean implements Serializable {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.TABLE, generator = "holdingIdGen")
+    @Column(name = "HOLDINGID", nullable = false)
+    private Integer holdingID;
+
+    @Column(name = "QUANTITY", nullable = false)
+    private double quantity;
+
+    @Column(name = "PURCHASEPRICE")
+    private BigDecimal purchasePrice;
+
+    @Column(name = "PURCHASEDATE")
+    @Temporal(TemporalType.TIMESTAMP)
+    private Date purchaseDate;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "ACCOUNT_ACCOUNTID")
+    private AccountDataBean account;
+
+    @ManyToOne(fetch = FetchType.EAGER)
+    @JoinColumn(name = "QUOTE_SYMBOL")
+    private QuoteDataBean quote;
+}
+```
+
+**SQL DDL:**
+
+```sql
+create table holdingejb
+  (purchaseprice decimal(10, 2),
+   holdingid integer not null,
+   quantity double not null,
+   purchasedate timestamp,
+   account_accountid integer,
+   quote_symbol varchar(250),
+   optLock integer);
+
+alter table holdingejb
+  add constraint pk_holdingejb primary key (holdingid);
+
+create index account_accountid on holdingejb(account_accountid);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `HOLDINGID` | `integer NOT NULL` | Primary key; generated via `KEYGENEJB` table |
+| `QUANTITY` | `double NOT NULL` | Number of shares held |
+| `PURCHASEPRICE` | `decimal(10,2)` | Price per share at time of purchase |
+| `PURCHASEDATE` | `timestamp` | Date/time of purchase; set to `Timestamp(0)` when inflight for sale |
+| `ACCOUNT_ACCOUNTID` | `integer` | FK → `accountejb.accountid` |
+| `QUOTE_SYMBOL` | `varchar(250)` | FK → `quoteejb.symbol` |
+| `optLock` | `integer` | JPA optimistic-lock version column |
+
+**Relationships:**
+- `@ManyToOne` (lazy) → `AccountDataBean` via `ACCOUNT_ACCOUNTID`
+- `@ManyToOne` (**eager**) → `QuoteDataBean` via `QUOTE_SYMBOL`
+
+---
+
+## Entity: OrderDataBean
+
+**Table:** `orderejb`  
+**Java class:** `com.ibm.websphere.samples.daytrader.entities.OrderDataBean`
+
+`OrderDataBean` is the central transaction record. Every buy or sell creates an order with status `"open"`. The order progresses through `"processing"` → `"closed"` (set by `completeOrder`) and then to `"completed"` (set by `getClosedOrders` when the user views their order history). Long-run benchmarks delete completed orders to prevent unbounded table growth. The entity declares a rich set of `@NamedQuery` definitions used by the JPQL-based query paths.
+
+```java
+@Entity(name = "orderejb")
+@Table(name = "orderejb")
+public class OrderDataBean implements Serializable {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.TABLE, generator = "orderIdGen")
+    @Column(name = "ORDERID", nullable = false)
+    private Integer orderID;
+
+    @Column(name = "ORDERTYPE")
+    private String orderType;       // "buy" or "sell"
+
+    @Column(name = "ORDERSTATUS")
+    private String orderStatus;     // "open", "processing", "closed", "completed", "cancelled"
+
+    @Column(name = "OPENDATE")
+    @Temporal(TemporalType.TIMESTAMP)
+    private Date openDate;
+
+    @Column(name = "COMPLETIONDATE")
+    @Temporal(TemporalType.TIMESTAMP)
+    private Date completionDate;
+
+    @Column(name = "QUANTITY", nullable = false)
+    private double quantity;
+
+    @Column(name = "PRICE")
+    private BigDecimal price;
+
+    @Column(name = "ORDERFEE")
+    private BigDecimal orderFee;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "ACCOUNT_ACCOUNTID")
+    private AccountDataBean account;
+
+    @ManyToOne(fetch = FetchType.EAGER)
+    @JoinColumn(name = "QUOTE_SYMBOL")
+    private QuoteDataBean quote;
+
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "HOLDING_HOLDINGID")
+    private HoldingDataBean holding;
+}
+```
+
+**SQL DDL:**
+
+```sql
+create table orderejb
+  (orderfee decimal(10, 2),
+   completiondate timestamp,
+   ordertype varchar(250),
+   orderstatus varchar(250),
+   price decimal(10, 2),
+   quantity double not null,
+   opendate timestamp,
+   orderid integer not null,
+   account_accountid integer,
+   quote_symbol varchar(250),
+   holding_holdingid integer,
+   optLock integer);
+
+alter table orderejb
+  add constraint pk_orderejb primary key (orderid);
+
+create index account_accountidt on orderejb(account_accountid);
+create index holding_holdingid  on orderejb(holding_holdingid);
+create index orderstatus        on orderejb(orderstatus);
+create index ordertype          on orderejb(ordertype);
+```
+
+| Column | Type | Notes |
+|---|---|---|
+| `ORDERID` | `integer NOT NULL` | Primary key; generated via `KEYGENEJB` table |
+| `ORDERTYPE` | `varchar(250)` | `"buy"` or `"sell"` |
+| `ORDERSTATUS` | `varchar(250)` | `"open"`, `"processing"`, `"closed"`, `"completed"`, or `"cancelled"` |
+| `OPENDATE` | `timestamp` | When the order was submitted |
+| `COMPLETIONDATE` | `timestamp` | When `completeOrder` ran; `NULL` until completion |
+| `QUANTITY` | `double NOT NULL` | Number of shares in the order |
+| `PRICE` | `decimal(10,2)` | Execution price (quote price at time of order creation) |
+| `ORDERFEE` | `decimal(10,2)` | Brokerage commission fee |
+| `ACCOUNT_ACCOUNTID` | `integer` | FK → `accountejb.accountid` |
+| `QUOTE_SYMBOL` | `varchar(250)` | FK → `quoteejb.symbol` |
+| `HOLDING_HOLDINGID` | `integer` | FK → `holdingejb.holdingid`; `NULL` for open orders |
+| `optLock` | `integer` | JPA optimistic-lock version column |
+
+**Relationships:**
+- `@ManyToOne` (lazy) → `AccountDataBean` via `ACCOUNT_ACCOUNTID`
+- `@ManyToOne` (**eager**) → `QuoteDataBean` via `QUOTE_SYMBOL`
+- `@OneToOne` (lazy) → `HoldingDataBean` via `HOLDING_HOLDINGID`
+
+---
+
+## Entity-Relationship Summary
+
+```
+AccountProfileDataBean (1) ──── (1) AccountDataBean
+                                      │
+                         ┌────────────┴────────────┐
+                         │                         │
+              (many) OrderDataBean        (many) HoldingDataBean
+                         │                         │
+                         └──── (many→1) ───────────┘
+                                    QuoteDataBean
+```
+
+---
+
+## Scale Parameters
+
+DayTrader 7 is pre-populated at benchmark time according to three constants defined in `TradeConfig`:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `MAX_USERS` | **15,000** | Number of user accounts (`uid:0` through `uid:14999`) pre-seeded in `accountejb` and `accountprofileejb` |
+| `MAX_QUOTES` | **10,000** | Number of stock symbols (`s:0` through `s:9999`) pre-seeded in `quoteejb` |
+| `MAX_HOLDINGS` | **10** | Maximum number of open holdings per user; scenario servlet avoids buying beyond this limit |
+
+<Tip>
+These defaults are tunable through the DayTrader configuration page (`/daytrader/config`) at runtime without restarting the server. Larger values stress the database tier more aggressively; smaller values keep ramp-up time short for development testing.
+</Tip>

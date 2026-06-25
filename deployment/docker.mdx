@@ -1,0 +1,192 @@
+---
+title: "Run DayTrader 7 in a Docker Container with DB2"
+sidebarTitle: "Docker"
+description: "Containerize DayTrader 7 using the provided Containerfile with IBM WebSphere Liberty and a DB2 database backend."
+---
+
+The repository provides a `Containerfile_db2` that packages DayTrader 7 on top of the official IBM WebSphere Liberty kernel image (`icr.io/appcafe/websphere-liberty:kernel-java17-openj9-ubi`), using Java 17 with the Eclipse OpenJ9 JVM on Red Hat Universal Base Image (UBI). The container is configured for a DB2 backend via `server_db2_container.xml`, which resolves all database connection details from environment variables passed at `docker run` time.
+
+<Warning>
+  `Containerfile_db2` does **not** include an embedded Derby database. A running and accessible DB2 instance is required before starting the container. Without it, Liberty will fail to acquire a data-source connection on startup.
+</Warning>
+
+## Prerequisites
+
+<CardGroup cols={3}>
+  <Card title="Docker or Podman" icon="docker">
+    Any OCI-compatible container runtime. Commands below use `docker`; substitute `podman` if preferred.
+  </Card>
+  <Card title="DB2 Instance" icon="database">
+    A DB2 server reachable from the container, with a `TRADEDB` database created and a user account ready.
+  </Card>
+  <Card title="DB2 JDBC Jars" icon="file">
+    `db2jcc4.jar` and `db2jcc_license_cu.jar` must be present in a local `db2jars/` directory at build time.
+  </Card>
+</CardGroup>
+
+## Containerfile
+
+The full `Containerfile_db2` is reproduced below. The `configure.sh` script at the end is provided by the WebSphere Liberty base image and applies any requested XML feature snippets, grows the image to a fit-for-purpose size, and applies available interim fixes:
+
+```dockerfile
+FROM icr.io/appcafe/websphere-liberty:kernel-java17-openj9-ubi
+
+# Copy application and config files
+COPY --chown=1001:0 daytrader-ee7/target/daytrader-ee7.ear /config/apps
+COPY --chown=1001:0 daytrader-ee7/src/main/liberty/config/server_db2_container.xml /config/server.xml
+COPY --chown=1001:0 jvm.container.options /config/
+
+# Copy DB2 client jar files
+COPY --chown=1001:0 db2jars /opt/ibm/wlp/usr/shared/resources/db2jars
+
+# This script will add the requested XML snippets, grow image to be fit-for-purpose and apply interim fixes
+RUN configure.sh
+```
+
+### What gets copied into the image
+
+| Source path | Container destination | Purpose |
+|---|---|---|
+| `daytrader-ee7/target/daytrader-ee7.ear` | `/config/apps/` | The compiled DayTrader 7 application archive |
+| `daytrader-ee7/src/main/liberty/config/server_db2_container.xml` | `/config/server.xml` | Liberty server config with DB2 data source and `mpHealth` / `transportSecurity` features |
+| `jvm.container.options` | `/config/` | Container-optimized JVM flags (verbose GC, heap dump, aggressive opts) |
+| `db2jars/` | `/opt/ibm/wlp/usr/shared/resources/db2jars/` | DB2 JDBC Type 4 driver jars |
+
+### jvm.container.options
+
+The `jvm.container.options` file is automatically picked up by Liberty inside the container and enables verbose GC logging, heap dumps, and OpenJ9 aggressive optimizations:
+
+```
+-verbose:gc
+-Xdump:heap
+-Xaggressive
+-Xverbosegclog:/logs/verbosegc.log,200,10000
+```
+
+## Build the image
+
+<Steps>
+  <Step title="Build the Maven artifact">
+    The Containerfile expects the compiled EAR at `daytrader-ee7/target/daytrader-ee7.ear`. Run the full Maven build from the repository root first:
+
+    ```bash
+    mvn clean install
+    ```
+  </Step>
+
+  <Step title="Stage the DB2 JDBC jars">
+    Create a `db2jars/` directory at the repository root and copy in both driver files from your DB2 installation:
+
+    ```bash
+    mkdir -p db2jars
+    cp /path/to/db2jcc4.jar           db2jars/
+    cp /path/to/db2jcc_license_cu.jar db2jars/
+    ```
+
+    <Note>
+      The `COPY --chown=1001:0 db2jars /opt/ibm/wlp/usr/shared/resources/db2jars` instruction in the Containerfile expects this directory to exist at build time relative to the build context (the repository root). Liberty's `server_db2_container.xml` references the jars from `${shared.resource.dir}/db2jars`.
+    </Note>
+  </Step>
+
+  <Step title="Build the container image">
+    Run the build from the repository root, passing `Containerfile_db2` as the Dockerfile:
+
+    ```bash
+    docker build -t sample-daytrader7 -f Containerfile_db2 .
+    ```
+  </Step>
+</Steps>
+
+## Run the container
+
+Pass all five required environment variables to connect to your DB2 instance. The application exposes HTTPS on port **9443**:
+
+```bash
+docker run -d \
+  -e dbUser=<db_user> \
+  -e dbPass=<db_password> \
+  -e tradeDbHost=<db_host> \
+  -e tradeDbPort=50000 \
+  -e tradeDbName=TRADEDB \
+  -p 9443:9443 \
+  sample-daytrader7
+```
+
+| Environment variable | Description |
+|---|---|
+| `dbUser` | DB2 user that Liberty uses to authenticate (e.g. `db2inst1`) |
+| `dbPass` | Password for `dbUser` |
+| `tradeDbHost` | Hostname or IP address of the DB2 server, reachable from inside the container |
+| `tradeDbPort` | DB2 listener port — default is `50000` |
+| `tradeDbName` | Name of the DB2 database — default is `TRADEDB` |
+
+## Initialize the database
+
+Once the container is running, open the DayTrader configuration page and create the schema and seed data:
+
+```
+https://localhost:9443/daytrader/configure.html
+```
+
+Click **"(Re)-create DayTrader Database Tables and Indexes"**, then **"(Re)-populate DayTrader Database"**.
+
+<Note>
+  After first-time database population, restart the container so Liberty reinitializes its connection pool and JMS resources cleanly against the populated schema:
+
+  ```bash
+  docker restart <container_id>
+  ```
+</Note>
+
+## Server configuration (container)
+
+The `server_db2_container.xml` used inside the image extends the standard DB2 configuration with two additional Liberty features needed in a containerized environment — `mpHealth-1.0` (used by Kubernetes liveness/readiness probes) and `transportSecurity-1.0` (TLS support for the HTTPS endpoint):
+
+```xml
+<server>
+  <featureManager>
+    <feature>ejb-3.2</feature>
+    <feature>servlet-3.1</feature>
+    <feature>jsf-2.2</feature>
+    <feature>jpa-2.1</feature>
+    <feature>mdb-3.2</feature>
+    <feature>wasJmsServer-1.0</feature>
+    <feature>wasJmsClient-2.0</feature>
+    <feature>cdi-1.2</feature>
+    <feature>websocket-1.1</feature>
+    <feature>concurrent-1.0</feature>
+    <feature>jsonp-1.0</feature>
+    <feature>beanValidation-1.1</feature>
+    <feature>localConnector-1.0</feature>
+    <feature>mpHealth-1.0</feature>
+    <feature>transportSecurity-1.0</feature>
+  </featureManager>
+
+  <httpEndpoint host="*" httpPort="9082" httpsPort="9443" id="defaultHttpEndpoint">
+    <tcpOptions soReuseAddr="true"/>
+    <httpOptions maxKeepAliveRequests="-1"/>
+  </httpEndpoint>
+
+  <application id="daytrader7" location="daytrader-ee7.ear" name="daytrader7"/>
+
+  <connectionManager agedTimeout="-1" connectionTimeout="0" id="conMgr1"
+    maxIdleTime="-1" maxPoolSize="100" minPoolSize="100"
+    purgePolicy="FailingConnectionOnly" reapTime="-1"/>
+
+  <jdbcDriver id="DB2JCC" libraryRef="DB2JCCLib"/>
+  <library id="DB2JCCLib" filesetRef="DB2JCCFileset"/>
+  <fileset id="DB2JCCFileset" dir="${shared.resource.dir}/db2jars" includes="db2jcc4.jar"/>
+
+  <authData id="TradeDataSourceAuthData" user="${dbUser}" password="${dbPass}"/>
+  <authData id="TradeAdminAuthData"      user="${dbUser}" password="${dbPass}"/>
+
+  <dataSource jndiName="jdbc/TradeDataSource" jdbcDriverRef="DB2JCC"
+    id="DefaultDataSource" connectionManagerRef="conMgr1"
+    statementCacheSize="60" isolationLevel="TRANSACTION_READ_COMMITTED"
+    type="javax.sql.ConnectionPoolDataSource">
+    <properties serverName="${tradeDbHost}" portNumber="${tradeDbPort}"
+      databaseName="${tradeDbName}" driverType="4"
+      user="${dbUser}" password="${dbPass}"/>
+  </dataSource>
+</server>
+```

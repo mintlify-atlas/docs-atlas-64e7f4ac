@@ -1,0 +1,170 @@
+---
+title: "DayTrader 7 Runtime Modes and Order Processing Configuration"
+sidebarTitle: "Runtime Modes"
+description: "Configure DayTrader 7 runtime mode (EJB3 vs Direct JDBC), order processing mode (Sync vs Async), and other runtime parameters via the configuration servlet."
+---
+
+DayTrader 7 supports multiple runtime modes that fundamentally change how business logic executes — from fully-managed EJB transactions backed by JPA down to raw JDBC calls that bypass the EJB container entirely. These modes, along with a rich set of secondary parameters, are configured at runtime through the `/daytrader/config` page served by `TradeConfigServlet`. All settings are held as static fields on the `TradeConfig` class and are therefore JVM-scoped: they reset to their defaults on every server restart. To make a setting permanent, declare the corresponding init parameter on the relevant servlet in `web.xml`.
+
+---
+
+## Runtime Mode (`runTimeMode`)
+
+The runtime mode controls which implementation class handles all trading operations — account lookup, buy, sell, quote retrieval, portfolio management, and order completion.
+
+<Tabs>
+  <Tab title="EJB3 (default)">
+    **Constant:** `TradeConfig.EJB3 = 0`  
+    **Display name:** `"Full EJB3"`
+
+    All trading operations are routed through `TradeSLSBBean`, a `@Stateless` session EJB declared in the `daytrader-ee7-ejb` module. The EJB container manages:
+
+    - **Transaction demarcation** — each service method runs in a container-managed transaction (`REQUIRED` by default).
+    - **Entity lifecycle** — JPA entity beans (`AccountDataBean`, `QuoteDataBean`, `OrderDataBean`, `HoldingDataBean`, `AccountProfileDataBean`) are managed by the JPA persistence context injected into `TradeSLSBBean`.
+    - **Security** — method-level permissions declared in `ejb-jar.xml` enforce role-based access for groups `grp1` through `grp5`.
+
+    This is the correct mode for functional testing, JSF UI usage, and any scenario that exercises the full Java EE 7 programming model.
+
+    ```java
+    // TradeConfig.java
+    public static final int EJB3 = 0;
+    public static int runTimeMode = EJB3;  // default
+    ```
+  </Tab>
+  <Tab title="Direct (JDBC)">
+    **Constant:** `TradeConfig.DIRECT = 1`  
+    **Display name:** `"Direct (JDBC)"`
+
+    All trading operations are handled by `TradeDirect`, a plain Java class that issues JDBC calls directly against the `jdbc/TradeDataSource` connection pool, bypassing the EJB container and JPA. `TradeDirect` also uses JMS directly to queue orders to `TradeBrokerQueue`.
+
+    Because there is no EJB interceptor overhead, Direct mode typically shows higher raw throughput in micro-benchmarks. Use it when you want to measure the JDBC and JMS stack in isolation, or when profiling connection pool behaviour.
+
+    ```java
+    // TradeConfig.java
+    public static final int DIRECT = 1;
+    ```
+
+    <Warning>
+      In Direct mode, transaction boundaries are managed programmatically. If `JDBCDriverNeedsGlobalTransation` is set to `true`, `TradeDirect` wraps each operation in a `UserTransaction` — required by some XA JDBC drivers even in non-EJB contexts.
+    </Warning>
+  </Tab>
+</Tabs>
+
+---
+
+## Order Processing Mode (`orderProcessingMode`)
+
+The order processing mode controls what happens between the moment a buy or sell request arrives and the moment the order record is marked `closed` in the database. The three modes differ in their threading model, transaction shape, and latency characteristics.
+
+| Mode | Constant | Mechanism | Typical use case |
+|------|----------|-----------|-----------------|
+| **Synchronous** | `SYNCH = 0` | Order is created, processed, and completed inside a single container-managed transaction on the request thread. | Functional testing; lowest latency for single-user scenarios |
+| **Async 2-Phase** | `ASYNCH_2PHASE = 1` | Order is created in phase 1. A JMS message is sent to `TradeBrokerQueue`. `DTBroker3MDB` picks up the message in a separate transaction (phase 2) and completes the order using XA 2-phase commit across the JMS and JDBC resources. | Benchmarking async throughput; exercises the embedded Liberty JMS broker and MDB container |
+| **Async ManagedThread** | `ASYNCH_MANAGEDTHREAD = 2` | Order is created synchronously, then dispatched to a `ManagedExecutorService` (JSR-236 Concurrency Utilities, `concurrent-1.0` feature). The managed thread completes the order outside the HTTP request thread but within the Liberty thread pool. | Testing Java EE 7 Concurrency Utilities; avoids JMS overhead while still decoupling request handling from order completion |
+
+```java
+// TradeConfig.java
+public static String[] orderProcessingModeNames = { "Sync", "Async_2-Phase", "Async_ManagedThread" };
+public static final int SYNCH               = 0;
+public static final int ASYNCH_2PHASE       = 1;
+public static final int ASYNCH_MANAGEDTHREAD = 2;
+public static int orderProcessingMode = SYNCH;  // default
+```
+
+<Note>
+  The `Async_2-Phase` mode requires the `wasJmsServer-1.0`, `wasJmsClient-2.0`, and `mdb-3.2` features to be active — all of which are present in every provided `server.xml`. The `jmsActivationSpec` for `eis/TradeBrokerMDB` in `server.xml` is specifically what wires `DTBroker3MDB` to `TradeBrokerQueue`.
+</Note>
+
+---
+
+## Other runtime parameters
+
+The following parameters are also exposed on the `/daytrader/config` page and stored as static fields in `TradeConfig`. Default values are taken directly from `TradeConfig.java` and confirmed in `daytrader-ee7-web/src/main/webapp/properties/daytrader.properties`.
+
+<Accordion title="Database scale">
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MAX_USERS` | `15,000` | Number of simulated trader accounts seeded in the database. The scenario servlet draws user IDs from a shuffled deck of `uid:0` through `uid:(MAX_USERS-1)`. Changing this value resets the deck. |
+| `MAX_QUOTES` | `10,000` | Number of stock quote rows. Symbol names are `s:0` through `s:(MAX_QUOTES-1)`. The `rndSymbol()` helper picks randomly within this range. |
+
+</Accordion>
+
+<Accordion title="Market summary and WebSocket">
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `marketSummaryInterval` | `20` (seconds) | How often the cached market summary is refreshed. `-1` means recalculate on every request; `0` means never recalculate (serve the cached value indefinitely); any positive integer is the minimum number of seconds between refreshes. |
+| `publishQuotePriceChange` | `true` | When `true`, every buy or sell that changes a quote's price publishes a JMS message to `jms/TradeStreamerTopic`. `TradeStreamerMDB` then forwards the payload to connected WebSocket clients via `TradeWebsocket`. |
+| `percentSentToWebsocket` | `5` (percent) | Percentage of quote price-change notifications that are actually forwarded to WebSocket sessions. Reducing this value lowers WebSocket overhead without disabling the feature entirely. |
+
+</Accordion>
+
+<Accordion title="Order and UI behaviour">
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `updateQuotePrices` | `true` | When `true`, the quote price and trading volume are updated in the `QUOTE` table on every buy or sell operation. Set to `false` to remove write contention on the quotes table during read-heavy benchmarks. |
+| `displayOrderAlerts` | `true` | When `true`, a notification panel showing recently completed orders appears on the trading home page. |
+| `primIterations` | `1` | Number of times the "Web Primitive" workload loops within a single HTTP request. Increase this to amplify CPU or I/O work per request without raising the request rate. |
+
+</Accordion>
+
+---
+
+## Making configuration permanent
+
+Changes made through the `/daytrader/config` UI are applied immediately but are lost when the server restarts, because `TradeConfig` fields are initialized from their Java defaults on each JVM start.
+
+To persist a setting across restarts, declare it as a servlet `init-param` in `WEB-INF/web.xml`. `TradeConfigServlet.init()` calls `TradeConfig.setConfigParam(name, value)` for each init parameter it finds, applying the value before any request is served.
+
+The following example shows how to switch the default runtime mode to Direct and lower `maxUsers` to 5,000:
+
+```xml
+<!-- daytrader-ee7-web/src/main/webapp/WEB-INF/web.xml -->
+<servlet>
+    <servlet-name>TradeConfigServlet</servlet-name>
+    <servlet-class>
+        com.ibm.websphere.samples.daytrader.web.TradeConfigServlet
+    </servlet-class>
+    <init-param>
+        <param-name>runTimeMode</param-name>
+        <param-value>Direct (JDBC)</param-value>
+    </init-param>
+    <init-param>
+        <param-name>maxUsers</param-name>
+        <param-value>5000</param-value>
+    </init-param>
+    <init-param>
+        <param-name>orderProcessingMode</param-name>
+        <param-value>Async_2-Phase</param-value>
+    </init-param>
+    <load-on-startup>1</load-on-startup>
+</servlet>
+```
+
+<Tip>
+  The `param-value` strings for `runTimeMode` and `orderProcessingMode` must match the entries in `TradeConfig.runTimeModeNames` and `TradeConfig.orderProcessingModeNames` exactly (case-insensitive). Valid values are:
+  - `runTimeMode`: `"Full EJB3"`, `"Direct (JDBC)"`
+  - `orderProcessingMode`: `"Sync"`, `"Async_2-Phase"`, `"Async_ManagedThread"`
+</Tip>
+
+The full set of parameter names recognised by `TradeConfig.setConfigParam()` mirrors the field names used in `daytrader.properties`:
+
+```properties
+# daytrader-ee7-web/src/main/webapp/properties/daytrader.properties
+runtimeMode=0
+useRemoteEJBInterface=false
+maxUsers=15000
+maxQuotes=10000
+publishQuotePriceChange=true
+percentSentToWebsocket=10
+displayOrderAlerts=true
+orderProcessingMode=0
+webInterface=0
+marketSummaryInterval=20
+primIterations=1
+longRun=true
+trace=false
+actionTrace=false
+```

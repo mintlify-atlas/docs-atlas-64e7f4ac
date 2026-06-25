@@ -1,0 +1,78 @@
+---
+title: "DayTrader 7: Java EE 7 Performance Benchmark Application"
+sidebarTitle: "Introduction"
+description: "DayTrader 7 is a Java EE 7 benchmark sample that simulates an online stock brokerage to measure and compare application server performance."
+---
+
+DayTrader 7 is an end-to-end Java EE 7 benchmark application derived from the Apache DayTrader benchmark. Built around the paradigm of an online stock trading system, DayTrader was designed to provide a realistic, real-world Java EE workload that can be used to measure and compare the performance of enterprise application servers from multiple vendors. With the aid of a web-based load driver such as Apache JMeter, DayTrader generates sustained, representative transactional traffic across a broad set of Java EE 7 technologies — making it one of the most comprehensive open benchmarks available for the Java EE platform.
+
+## What DayTrader Does
+
+From an end-user perspective, DayTrader behaves like a functioning online stock brokerage. After registering or logging in, users can:
+
+- **View their portfolio** — a list of current stock holdings with purchase price, current value, and unrealised gain/loss
+- **Look up stock quotes** — retrieve live (simulated) price data for any listed symbol
+- **Buy shares** — select a symbol and quantity; the order is submitted, debiting the account balance and adding a new holding
+- **Sell shares** — select an existing holding to liquidate; the account is credited with the proceeds
+- **Review orders** — inspect the history of open, completed, and cancelled buy/sell orders
+- **Update account profile** — maintain personal and contact information
+
+In addition to the full trading workload, DayTrader exposes a suite of *primitives* — targeted micro-benchmarks for individual Java EE components and common design patterns — for more focused functional and performance testing.
+
+## Java EE 7 Technologies Exercised
+
+DayTrader 7 spans the breadth of the Java EE 7 platform. The following specifications are exercised during a standard benchmark run:
+
+| Technology | Version | Role in DayTrader |
+|---|---|---|
+| **EJB** | 3.2 | Stateless session beans implement all core business logic (`TradeServices`) |
+| **JPA** | 2.1 | Persistence of accounts, holdings, orders, and stock quotes via annotated entities |
+| **JSF** | 2.2 | Primary web interface for account and portfolio pages |
+| **CDI** | 1.2 | Dependency injection throughout the web and EJB tiers |
+| **JMS / MDB** | 2.0 | Asynchronous order processing; Message-Driven Beans consume trade orders from queues |
+| **WebSocket** | 1.1 | Real-time push of stock quote price changes to connected browser clients |
+| **Bean Validation** | 1.1 | Input validation on account registration and order submission |
+| **JSON-P** | 1.0 | JSON processing for market summary and quote data |
+| **Concurrency Utilities** | 1.0 | Managed threads for the `Async_ManagedThread` order processing mode |
+| **Servlets** | 3.1 | Scenario driver servlet, configuration servlet, and web primitives |
+
+## Runtime Modes
+
+DayTrader supports two runtime modes, selectable from the configuration page at `/daytrader/config`. The mode controls which implementation of the `TradeServices` interface handles each request.
+
+### EJB3 Mode — `Full EJB3` (default)
+
+In EJB3 mode (`runTimeMode = 0`), all business operations are delegated to stateless session beans. This is the standard, recommended mode for benchmarking a full Java EE application server stack, exercising container-managed transactions, EJB interceptors, and the complete EJB 3.2 lifecycle.
+
+### Direct Mode — `Direct (JDBC)`
+
+In Direct mode (`runTimeMode = 1`), the application bypasses the EJB tier entirely and issues JDBC calls and JMS operations directly from the web layer using `TradeDirect`. This mode isolates the overhead of the EJB container and is useful for comparing raw JDBC/JMS performance against the full EJB stack.
+
+## Order Processing Modes
+
+Independently of the runtime mode, DayTrader offers three strategies for processing buy and sell orders, controlled by the `orderProcessingMode` setting:
+
+- **Sync** (`SYNCH`) — Orders are processed synchronously within the same transaction as the buy/sell request. The response is not returned until the order is fully completed.
+- **Async 2-Phase** (`Async_2-Phase`) — Orders are placed on a JMS queue and processed asynchronously by a Message-Driven Bean. The operation participates in a two-phase commit (XA) transaction, coordinating the database update and the JMS message delivery.
+- **Async Managed Thread** (`Async_ManagedThread`) — Orders are dispatched to a Java EE Concurrency Utilities managed thread for asynchronous completion, without a JMS dependency.
+
+## Explore DayTrader 7
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build and run DayTrader 7 locally on Open Liberty with embedded Derby in under five minutes.
+  </Card>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    Understand the multi-tier structure, module responsibilities, and data flow through the application.
+  </Card>
+  <Card title="Configuration Reference" icon="sliders" href="/configuration/server">
+    Explore all runtime configuration options: modes, database settings, and Liberty server configuration.
+  </Card>
+  <Card title="Benchmarking" icon="chart-line" href="/benchmarking/overview">
+    Learn how to drive load with Apache JMeter, interpret run statistics, and tune the benchmark.
+  </Card>
+</CardGroup>
+
+<Note>
+DayTrader 7 targets the **Open Liberty runtime version 8.5.5.6 and later**. Building and running the sample requires **Maven 3.x** (or Gradle) and a **JDK 8 or later**. An embedded Apache Derby database is included for zero-configuration local development; IBM DB2 is recommended for production performance benchmarking.
+</Note>

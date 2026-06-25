@@ -1,0 +1,245 @@
+---
+title: "Database Setup and Schema for DayTrader 7"
+sidebarTitle: "Database"
+description: "Set up the DayTrader 7 database using Derby or DB2, initialize tables and sample data, and understand the schema for the five core entities."
+---
+
+DayTrader 7 ships with a pre-populated Apache Derby database at `daytrader-ee7/resources/data/tradedb` so you can start the application immediately without any external database infrastructure. For performance benchmarking and load testing, IBM DB2 is the recommended backend — it supports the connection pooling, bufferpool tuning, and backup/restore workflow that rigorous benchmark methodology requires.
+
+---
+
+## Using embedded Derby
+
+The Derby database is packaged directly in the repository and is referenced in `server.xml` as:
+
+```xml
+<properties.derby.embedded createDatabase="create"
+    databaseName="${shared.resource.dir}/data/tradedb"
+    password="db_password" user="db_username"/>
+```
+
+Liberty resolves `${shared.resource.dir}` to `<LIBERTY_HOME>/usr/shared/resources/`. The Maven build copies the pre-populated Derby store into that location automatically when you run `mvn clean install`.
+
+**Default credentials** (set in `server.xml` `authData` elements):
+
+| Element | User | Password |
+|---------|------|----------|
+| `TradeDataSourceAuthData` | `db_username` | `db_password` |
+| `TradeAdminAuthData` | `db_username` | `db_password` |
+
+<Note>
+  The embedded Derby database already contains 15,000 users (`uid:0` through `uid:14999`) and 10,000 stock quote symbols (`s:0` through `s:9999`). You do not need to run the populate step for local development.
+</Note>
+
+### Reinitializing the Derby database
+
+If you need to reset or rebuild the tables and sample data (for example, after schema changes), use the built-in configuration UI:
+
+<Steps>
+  <Step title="Start the server">
+    ```bash
+    <LIBERTY_HOME>/bin/server start
+    ```
+  </Step>
+  <Step title="Open the configuration page">
+    Navigate to `http://localhost:9082/daytrader/configure.html` in a browser.
+  </Step>
+  <Step title="Recreate tables">
+    Click **"(Re)-create DayTrader Database Tables and Indexes"**. This runs the DDL script appropriate for the detected database product.
+  </Step>
+  <Step title="Repopulate data">
+    Click **"(Re)-populate DayTrader Database"**. This inserts the default 15,000 users and 10,000 quotes.
+  </Step>
+</Steps>
+
+The DDL file selection logic in `TradeConfigServlet` automatically chooses the correct script from the `dbscripts/` directory based on the database product name returned by the JDBC driver:
+
+| Database product | DDL script path |
+|-----------------|-----------------|
+| `DB2/` | `dbscripts/db2/Table.ddl` |
+| `DB2 UDB for AS/400` | `dbscripts/db2i/Table.ddl` |
+| `Apache Derby` | `dbscripts/derby/Table.ddl` |
+| `Oracle` | `dbscripts/oracle/Table.ddl` |
+
+All DDL files are located under `daytrader-ee7-web/src/main/webapp/dbscripts/`.
+
+---
+
+## Using DB2
+
+IBM DB2 is the recommended database for load testing and benchmarking. Switch to DB2 by replacing `server.xml` with the provided `server_db2.xml` configuration.
+
+### Create the database
+
+<Steps>
+  <Step title="Disable DB2_APM_PERFORMANCE">
+    This registry variable must be off before database creation, otherwise DB2 raises `SQL1803N: The requested operation cannot be executed in "No Package Lock"`.
+
+    ```bash
+    db2set DB2_APM_PERFORMANCE=
+    db2stop
+    db2start
+    ```
+  </Step>
+  <Step title="Create the tradedb database">
+    Sign in to the DB2 machine as the DB2 instance owner and run:
+
+    ```bash
+    db2 create db tradedb
+    ```
+  </Step>
+</Steps>
+
+### Configure Liberty to use DB2
+
+Set the following environment variables on the Liberty server machine to match your DB2 environment. These are referenced directly in `server_db2.xml` via `${variable}` substitution:
+
+```bash
+export dbUser=<db2-instance-user>
+export dbPass=<db2-instance-password>
+export tradeDbHost=<db2-hostname-or-ip>
+export tradeDbPort=50000        # default DB2 port
+export tradeDbName=tradedb
+```
+
+Then copy the DB2 JDBC driver JARs from the DB2 server to the Liberty shared resource directory:
+
+```bash
+cp db2jcc4.jar          <LIBERTY_HOME>/usr/shared/resources/db2jars/
+cp db2jcc_license_cu.jar <LIBERTY_HOME>/usr/shared/resources/db2jars/
+```
+
+Finally, replace `server.xml` with the DB2 variant:
+
+```bash
+cp daytrader-ee7/src/main/liberty/config/server_db2.xml \
+   <LIBERTY_HOME>/usr/servers/defaultServer/server.xml
+```
+
+### Load the database
+
+Start Liberty and use the configuration page to create tables and populate data, exactly as described in the Derby section above:
+
+```
+http://<liberty-hostname>:9082/daytrader/configure.html
+```
+
+---
+
+## Database scale parameters
+
+DayTrader 7's database population size is governed by four constants in `TradeConfig.java`. The default values match what is pre-loaded in the embedded Derby store:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MAX_USERS` | `15,000` | Number of simulated trader accounts created in the `ACCOUNTPROFILE` and `ACCOUNT` tables |
+| `MAX_QUOTES` | `10,000` | Number of stock quote rows in the `QUOTE` table; symbols are `s:0` through `s:9999` |
+| `KEYBLOCKSIZE` | `1,000` | Block size used when generating batches of primary keys during database population |
+| `QUOTES_PER_PAGE` | `10` | Maximum number of quote symbols returned in a single `/quote` page request |
+
+<Tip>
+  `MAX_USERS` and `MAX_QUOTES` can be changed at runtime via the `/daytrader/config` page or by setting `maxUsers` and `maxQuotes` init parameters in `web.xml`. Changes take effect immediately for scenario generation but do not add or remove rows from the database — you must re-populate after changing these values.
+</Tip>
+
+---
+
+## DB2 performance tuning
+
+Before taking benchmark measurements, run the following tuning script on the DB2 server as the DB2 instance owner. These settings are taken directly from the `backupTradeDB.sh` script provided in the repository:
+
+```bash
+DB=tradedb
+
+# Pool agent and connection limits
+db2 update dbm cfg using notifylevel 0
+db2 update dbm cfg using diaglevel 1
+db2 update dbm cfg using NUM_POOLAGENTS 500 automatic \
+                         MAX_COORDAGENTS 500 automatic \
+                         MAX_CONNECTIONS 500 automatic
+
+# Lock list and max lock percentage
+db2 -v update db cfg for ${DB} using MAXLOCKS 100 LOCKLIST 100000
+
+db2 connect to ${DB}
+
+# Application concurrency
+db2 update db cfg for ${DB} using maxappls 500 automatic
+
+# Transaction log sizing
+db2 update db cfg for ${DB} using logfilsiz 8000
+db2 update db cfg for ${DB} using logprimary 32
+
+# Query optimizer — level 0 minimizes planning overhead for simple OLTP
+db2 update db cfg for ${DB} using dft_queryopt 0
+
+# Buffer pool and changed-pages threshold
+db2 update db cfg for ${DB} using softmax 3000
+db2 update db cfg for ${DB} using chngpgs_thresh 99
+
+# Resize the default buffer pool to automatic, then override with BUFFPAGE
+db2 -v alter bufferpool IBMDEFAULTBP size -1
+db2 -v connect reset
+db2 -v update db cfg for ${DB} using BUFFPAGE 262144
+
+# Registry tuning variables
+db2set DB2_APM_PERFORMANCE=ON
+db2set DB2_KEEPTABLELOCK=CONNECTION
+db2set DB2_USE_ALTERNATE_PAGE_CLEANING=ON
+db2set DB2_MINIMIZE_LISTPREFETCH=YES
+db2set DB2_LOGGER_NON_BUFFERED_IO=OFF
+
+db2 connect reset
+db2 terminate
+db2stop force
+db2start
+
+# Update statistics after restart
+db2 connect to ${DB}
+db2 reorgchk update statistics
+db2 connect reset
+db2 terminate
+```
+
+After tuning, take a backup of the fully-populated, tuned database. This snapshot is restored before each measurement run:
+
+```bash
+db2 backup db tradedb to ~/backups/tradedb
+```
+
+<Warning>
+  Run the tuning script and take the backup **after** populating the database but **before** starting any load. The backup captures the clean initial state (all orders open, balances at starting values) that is required for reproducible measurements.
+</Warning>
+
+---
+
+## Resetting between benchmark runs
+
+Keeping the database in a known state between runs is essential for reproducible results. Two complementary reset mechanisms are available:
+
+<Tabs>
+  <Tab title="In-application reset (lightweight)">
+    The `resetTrade` action truncates the `ORDER` table and resets account balances and holding quantities to their seeded values without a full DB2 restore. It is faster but only resets application-level state:
+
+    ```
+    http://<liberty-hostname>:9082/daytrader/config?action=resetTrade
+    ```
+
+    This is appropriate between warm-up runs or when only order-related state needs clearing.
+  </Tab>
+  <Tab title="DB2 restore (full)">
+    For a complete, bit-for-bit identical starting state restore the database from the tuned backup before each measurement run:
+
+    ```bash
+    # Run on the DB2 server as the DB2 instance owner
+    db2stop force
+    db2start
+    db2 restore db tradedb from ~/backups/tradedb replace existing
+    ```
+
+    The recommended benchmark methodology is three 180-second warm-up runs followed by three 180-second measurement runs, restoring the database before each measurement run.
+
+    <Note>
+      If disk I/O becomes a bottleneck during restore or during the run itself, consider mounting the DB2 data directory on a RAM disk and restoring into the RAM disk path.
+    </Note>
+  </Tab>
+</Tabs>

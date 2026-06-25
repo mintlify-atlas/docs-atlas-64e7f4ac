@@ -1,0 +1,92 @@
+{
+  "projectType": "general",
+  "projectName": "DayTrader 7",
+  "projectDescription": "A Java EE 7 benchmark sample application modeled as an online stock trading system, used to measure and compare performance of Java EE application servers.",
+  "theme": "aspen",
+  "primaryColor": "#e26029",
+  "lightColor": "#7c2c7b",
+  "darkColor": "#f69c24",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "building"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/local",
+              "deployment/docker",
+              "deployment/kubernetes"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/server",
+              "configuration/database",
+              "configuration/runtime-modes"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/data-model",
+              "architecture/java-ee-features"
+            ]
+          },
+          {
+            "group": "Load Testing & Benchmarking",
+            "pages": [
+              "benchmarking/overview",
+              "benchmarking/jmeter",
+              "benchmarking/web-primitives"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "End-to-end Java EE 7 benchmark application simulating a real-world stock trading workload",
+    "Multiple runtime modes: Full EJB3 and Direct JDBC",
+    "Asynchronous order processing via JMS message-driven beans (queue and pub/sub)",
+    "WebSocket support for real-time market summary updates",
+    "Dual web interface: JSP/Servlet and JSF (JavaServer Faces)",
+    "CDI, Bean Validation, JPA, JSONP, and Concurrency Utilities coverage",
+    "Apache JMeter integration for automated load testing",
+    "Deployable on Open Liberty with embedded Derby or external DB2",
+    "Container-ready with Docker and Kubernetes (OpenLiberty Operator) support",
+    "Web Primitives suite for testing individual Java EE components"
+  ],
+  "publicApiSurface": [
+    "TradeServices.login(String userID, String password)",
+    "TradeServices.logout(String userID)",
+    "TradeServices.register(String userID, String password, String fullname, String address, String email, String creditcard, BigDecimal openBalance)",
+    "TradeServices.buy(String userID, String symbol, double quantity, int orderProcessingMode)",
+    "TradeServices.sell(String userID, Integer holdingID, int orderProcessingMode)",
+    "TradeServices.getMarketSummary()",
+    "TradeServices.getQuote(String symbol)",
+    "TradeServices.getAllQuotes()",
+    "TradeServices.getHoldings(String userID)",
+    "TradeServices.getOrders(String userID)",
+    "TradeServices.getAccountData(String userID)",
+    "TradeServices.getAccountProfileData(String userID)",
+    "TradeServices.updateAccountProfile(AccountProfileDataBean profileData)",
+    "TradeServices.resetTrade(boolean deleteAll)",
+    "HTTP /daytrader/app - TradeApp servlet (main web interface)",
+    "HTTP /daytrader/scenario - TradeScenario servlet (benchmark workload driver)",
+    "HTTP /daytrader/config - TradeConfig servlet (runtime configuration UI)",
+    "HTTP /daytrader/config?action=resetTrade - Reset trade database state",
+    "HTTP /daytrader/configure.html - Database setup page",
+    "WebSocket /daytrader/marketSummaryWebSocket - Real-time market summary feed"
+  ]
+}

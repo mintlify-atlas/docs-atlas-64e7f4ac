@@ -1,0 +1,116 @@
+---
+title: "DayTrader 7 Application Architecture Overview"
+sidebarTitle: "Overview"
+description: "Understand DayTrader 7's layered architecture: web tier, EJB business layer, JPA entities, JMS messaging, and WebSocket push notifications."
+---
+
+DayTrader 7 is a Java EE 7 benchmark application that simulates an online stock-trading brokerage. It follows a classic three-tier architecture: a **Web Tier** handles HTTP/WebSocket requests from browsers; an **EJB Business Layer** implements all trading logic through the `TradeServices` interface using either an EJB 3 stateless session bean (`TradeSLSBBean`) or a direct JDBC implementation (`TradeDirect`); and a **Database tier** stores the five JPA entity tables. Between the business layer and the database, JMS messaging decouples asynchronous order processing — buy/sell orders are queued to `TradeBrokerQueue` and completed by `DTBroker3MDB`, while stock price changes flow through `TradeStreamerTopic` to WebSocket clients in real time.
+
+## Application Modules
+
+DayTrader 7 is packaged as a Java EE EAR with three Maven modules, each with a distinct responsibility.
+
+<Note>
+All three modules are assembled into `daytrader-ee7.ear` and deployed to WebSphere Liberty via the `daytrader-ee7` module, which also owns `server.xml` and the Liberty feature configuration.
+</Note>
+
+### `daytrader-ee7-ejb` — Business Logic
+
+This module contains the complete server-side business and persistence tier:
+
+- **`TradeServices`** — the central business interface declaring every brokerage operation: `login`, `logout`, `register`, `buy`, `sell`, `getQuote`, `getHoldings`, `getOrders`, `getMarketSummary`, and more.
+- **`TradeAction`** — a servlet-facing facade that implements `TradeServices` and delegates to the configured runtime implementation (`TradeSLSBBean` via local or remote EJB interface, or `TradeDirect` for JDBC mode). It also handles market-summary caching logic for non-EJB3 modes.
+- **`TradeSLSBBean`** — the primary EJB 3 `@Stateless` session bean implementation of `TradeServices`, backed by a JPA `EntityManager` and a `ManagedThreadFactory` for async order processing.
+- **`TradeDirect`** — an alternative direct JDBC/JMS implementation of `TradeServices`, used when the runtime mode is set to `DIRECT`.
+- **JPA entities** — `AccountDataBean`, `AccountProfileDataBean`, `QuoteDataBean`, `HoldingDataBean`, and `OrderDataBean` (see [Data Model](/architecture/data-model)).
+- **`DTBroker3MDB`** — a `@MessageDriven` bean consuming `TradeBrokerQueue` (point-to-point) to complete asynchronous buy/sell orders.
+- **`DTStreamer3MDB`** — a `@MessageDriven` bean subscribing to `TradeStreamerTopic` (pub/sub) to relay stock price change events to the WebSocket tier via a CDI `Event`.
+- **`MarketSummarySingleton`** — an `@Singleton` EJB that refreshes the market summary every 20 seconds via `@Schedule` and exposes it with `@Lock`-protected read/write accessors.
+
+### `daytrader-ee7-web` — Web Tier
+
+This module provides all user-facing and benchmark-driving web components:
+
+- **Servlets** — `TradeAppServlet`, `TradeScenarioServlet`, and `TradeConfigServlet` drive the HTML-based trading interface and the automated benchmark scenario loops.
+- **JSF Managed Beans** — a full JSF 2.2 front-end with CDI-managed beans: `TradeAppJSF`, `PortfolioJSF`, `OrderDataJSF`, `QuoteJSF`, `AccountDataJSF`, `MarketSummaryJSF`, `TradeConfigJSF`.
+- **`MarketSummaryWebSocket`** — a `@ServerEndpoint("/marketsummary")` WebSocket endpoint that delivers real-time market summaries and stock price changes to connected browsers.
+- **Web Primitives** — a suite of isolated micro-benchmark servlets under `web/prims/` that exercise individual Java EE features (Servlet, CDI, EJB, JMS, WebSocket, JSONP, Concurrency Utilities, JDBC, JSP, etc.) for targeted performance analysis.
+
+### `daytrader-ee7` — EAR Packaging and Server Configuration
+
+This module assembles the EAR artifact and contains the Liberty `server.xml` that configures all 13 Liberty features, the embedded Derby data source (`jdbc/TradeDataSource`), JMS queues and topics (`TradeBrokerQueue`, `TradeTopicSpace`), and connection managers.
+
+---
+
+## Request Flow: Buy or Sell Order
+
+The following steps trace the lifecycle of a typical `buy` or `sell` transaction through all layers of the application.
+
+<Steps>
+
+### Browser submits trade request
+The user submits a buy or sell form via a JSF page (rendered by `TradeAppJSF`) or the HTML servlet interface (`TradeAppServlet`).
+
+### Web tier invokes TradeAction
+The servlet or JSF bean instantiates `TradeAction`, which acts as the facade for all `TradeServices` operations. `TradeAction` determines the configured runtime mode (EJB3 or DIRECT) and selects the appropriate delegate.
+
+### TradeAction delegates to TradeServices implementation
+- **EJB3 mode**: `TradeAction` calls `TradeSLSBLocal.buy(userID, symbol, quantity, orderProcessingMode)` via the local EJB interface. Container-managed transactions are applied via `@TransactionAttribute(REQUIRED)`.
+- **Direct mode**: `TradeAction` calls `TradeDirect.buy(...)` which uses JDBC directly against `jdbc/TradeDataSource`.
+
+### TradeSLSBBean processes the order synchronously or asynchronously
+`TradeSLSBBean.buy()` looks up the `AccountProfileDataBean` and `QuoteDataBean` via the JPA `EntityManager`, creates an `OrderDataBean` with status `"open"`, and debits the account balance.
+
+- **Synchronous** (`SYNCH` mode): `completeOrder(orderID, false)` is called in the same transaction, creating the `HoldingDataBean` and marking the order `"closed"`.
+- **Asynchronous** (`ASYNCH` or `ASYNCH_2PHASE` mode): `queueOrder(orderID, twoPhase)` sends a JMS `TextMessage` to `TradeBrokerQueue` via `QueueConnectionFactory`.
+- **Managed-thread** (`ASYNCH_MANAGEDTHREAD` mode): `queueOrder` uses `ManagedThreadFactory` to launch a `CompleteOrderThread` instead of JMS.
+
+### DTBroker3MDB completes the async order (JMS path)
+`DTBroker3MDB.onMessage()` receives the `"neworder"` message from `TradeBrokerQueue`, extracts the `orderID`, and calls `TradeSLSBLocal.completeOrder(orderID, twoPhase)` — creating the holding for a buy or removing it for a sell, and setting the order status to `"closed"`.
+
+### Quote price update and pub/sub notification
+After every buy or sell, `TradeAction` calls `updateQuotePriceVolume()`, which updates the `QuoteDataBean`'s `price`, `change1`, and `volume` fields, then calls `publishQuotePriceChange()` to send a `TextMessage` to `TradeStreamerTopic`.
+
+### DTStreamer3MDB fires a CDI event
+`DTStreamer3MDB.onMessage()` receives the `"updateQuote"` message from `TradeStreamerTopic` and, for a configurable percentage of symbols, fires a CDI `Event<Message>` annotated with `@WebSocketJMSMessage`.
+
+### MarketSummaryWebSocket pushes to browsers
+`MarketSummaryWebSocket.onJMSMessage()` observes the CDI event (`@Observes @WebSocketJMSMessage`), adds the stock change to `RecentStockChangeList`, and the scheduler pushes the updated JSON to all connected WebSocket sessions.
+
+</Steps>
+
+---
+
+## Key Classes
+
+| Class | Package | Role |
+|---|---|---|
+| `TradeServices` | `com.ibm.websphere.samples.daytrader` | Central business interface defining all brokerage operations |
+| `TradeAction` | `com.ibm.websphere.samples.daytrader` | Servlet/JSF-facing facade; delegates to configured `TradeServices` impl |
+| `TradeSLSBBean` | `...ejb3` | `@Stateless` EJB implementing `TradeServices` with JPA and JMS |
+| `TradeDirect` | `...direct` | JDBC/JMS implementation of `TradeServices` for `DIRECT` mode |
+| `DTBroker3MDB` | `...ejb3` | `@MessageDriven` bean on `TradeBrokerQueue`; completes async orders |
+| `DTStreamer3MDB` | `...ejb3` | `@MessageDriven` bean on `TradeStreamerTopic`; fires CDI events to WebSocket |
+| `MarketSummarySingleton` | `...ejb3` | `@Singleton` EJB; refreshes market summary every 20 seconds via `@Schedule` |
+| `MarketSummaryWebSocket` | `...web.websocket` | `@ServerEndpoint("/marketsummary")`; pushes real-time price updates to browsers |
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Data Model"
+    icon="database"
+    href="/architecture/data-model"
+  >
+    Explore the five JPA entities, their fields, relationships, and the SQL DDL schema that backs them.
+  </Card>
+  <Card
+    title="Java EE Features"
+    icon="layer-group"
+    href="/architecture/java-ee-features"
+  >
+    See how DayTrader 7 exercises all 13 Liberty Java EE 7 features across EJB, JPA, JMS, WebSocket, CDI, and more.
+  </Card>
+</CardGroup>

@@ -1,0 +1,145 @@
+---
+title: "DayTrader 7 Web Primitives: Isolating Java EE Component Performance"
+sidebarTitle: "Web Primitives"
+description: "Use DayTrader 7's Web Primitives to benchmark individual Java EE components — servlets, JSPs, EJBs, JDBC, JMS, WebSocket — in isolation."
+---
+
+The Web Primitives in DayTrader 7 are a suite of micro-benchmark servlets that exercise individual Java EE components in isolation. Each primitive targets a single layer of the stack — the servlet container, JDBC, the EJB container, CDI, JMS, WebSocket, or the Concurrency Utilities — and returns a simple response that proves the operation completed. They are automatically installed with the DayTrader application and are accessible at `/daytrader/web_prmtv.html`.
+
+## Purpose
+
+While the full DayTrader workload measures end-to-end throughput across the entire Java EE stack, Web Primitives let you isolate a single component. This is useful for two distinct tasks:
+
+- **Bottleneck identification.** If total DayTrader throughput is lower than expected, primitives let you drill down: Is the servlet container the constraint? The EJB container? JDBC? CDI? Running each primitive under load and comparing their throughput tells you which tier is limiting overall performance.
+- **Feature validation.** When tuning a specific feature — for example, verifying that switching from synchronous to asynchronous servlet processing improves throughput under your workload — primitives let you test that single feature without the noise of the other components.
+
+Note that some primitives support multiple iterations per request, controlled by the `primIterations` setting in the DayTrader configuration page (`http://localhost:9082/daytrader/config`). Setting `primIterations` to a value greater than 1 reduces the relative overhead of the web container and shifts more work to the component under test — useful for stressing JDBC or EJB without generating proportionally more HTTP traffic.
+
+## Web Primitive categories
+
+### Servlet Primitives
+
+These primitives are located in `web/prims/` and measure the servlet container, HTTP session management, JSP dispatch, and related web tier features.
+
+| Primitive | URL | Description |
+|---|---|---|
+| `PingServlet` | `/servlet/PingServlet` | Baseline servlet throughput. Writes a small HTML response via `ServletOutputStream` with no DB access. Measures raw servlet container overhead. |
+| `PingServletWriter` | `/servlet/PingServletWriter` | Same as `PingServlet` but uses a `PrintWriter` for output instead of `ServletOutputStream`. Useful for comparing character encoding overhead. |
+| `PingServletSetContentLength` | `/servlet/PingServletSetContentLength` | Extends `PingServlet` by setting an explicit `Content-Length` response header, exercising the container's buffering behaviour. |
+| `PingServletLargeContentLength` | `/servlet/PingServletLargeContentLength` | Tests handling of large response payloads. |
+| `PingServlet2Jsp` | `/servlet/PingServlet2Jsp` | Servlet creates a `JavaBean` with dynamic attributes and forwards the request to a JSP via `RequestDispatcher`. Tests the servlet-to-JSP dispatch pattern. |
+| `PingServlet2Include` | `/servlet/PingServlet2Include` | Tests response inclusion: Servlet 1 includes the response of Servlet 2 via `RequestDispatcher.include()`. |
+| `PingServlet2Servlet` | `/servlet/PingServlet2Servlet` | Tests request dispatching: Servlet 1 creates a `JavaBean` and forwards to Servlet 2 via `RequestDispatcher.forward()`. |
+| `PingServlet2JNDI` | `/servlet/PingServlet2JNDI` | Servlet allocates a `JNDI InitialContext` and performs a JNDI lookup of the JDBC DataSource on each request. Measures JNDI lookup overhead in the servlet tier. |
+| `PingServlet30Async` | `/servlet/PingServlet30Async` | Tests Servlet 3.0 asynchronous processing (`AsyncContext`). |
+| `PingServlet31Async` | `/servlet/PingServlet31Async` | Tests Servlet 3.1 asynchronous processing with non-blocking NIO write. |
+| `PingServlet31AsyncRead` | `/servlet/PingServlet31AsyncRead` | Tests Servlet 3.1 non-blocking NIO read (`ReadListener`). |
+| `PingReentryServlet` | `/servlet/PingReentryServlet` | Tests servlet re-entry (a servlet dispatching to itself). |
+| `PingSession1` | `/servlet/PingSession1` | Creates a unique session ID per user and stores it in the `HttpSession`. Tests fundamental session creation and read access. |
+| `PingSession2` | `/servlet/PingSession2` | Extends `PingSession1` by invalidating the session every 5th request. Tests `HttpSession` create and destroy throughput. |
+| `PingSession3` | `/servlet/PingSession3` | Creates and retrieves a large custom Java object (2,048 bytes) from the session on every request. Tests the server's ability to manage and persist large `HttpSession` data objects. |
+
+### JDBC Primitives
+
+These primitives measure the JDBC layer in isolation — connection pool acquisition, prepared statement execution, and read vs. write throughput directly from a servlet.
+
+| Primitive | URL | Description |
+|---|---|---|
+| `PingJDBCRead` | `/servlet/PingJDBCRead` | Single-row read from the `quoteejb` table via a prepared statement. Uses `TradeDirect` (direct JDBC) to call `getQuote(symbol)` for a randomly selected stock symbol. Respects `primIterations`. |
+| `PingJDBCRead2JSP` | `/servlet/PingJDBCRead2JSP` | Same single-row JDBC read as `PingJDBCRead`, but forwards the result to a JSP for HTML rendering. Tests the JDBC-to-JSP path. |
+| `PingJDBCWrite` | `/servlet/PingJDBCWrite` | Performs a JDBC read followed by a prepared-statement update, simulating a stock price change on the `quoteejb` table. Measures write throughput and connection pool contention under update workloads. |
+| `PingServlet2DB` | `/servlet/PingServlet2DB` | Simple servlet that acquires a JDBC connection from the pool and releases it without executing a query. Isolates connection pool acquisition overhead. |
+
+### EJB Primitives
+
+Located in `web/prims/ejb3/`, these primitives measure EJB 3 container overhead: local and remote SLSB invocation latency, JPA entity access, JMS message dispatch to MDBs, and two-phase commit transactions.
+
+| Primitive | URL | Description |
+|---|---|---|
+| `PingServlet2SessionLocal` | `/ejb3/PingServlet2SessionLocal` | Servlet calls a local Stateless Session Bean (SLSB) which performs a simple calculation. Measures local EJB invocation overhead with no database access. |
+| `PingServlet2SessionRemote` | `/ejb3/PingServlet2Session` | Servlet calls a remote SLSB over RMI/IIOP. Measures remote EJB invocation overhead. |
+| `PingServlet2Entity` | `/ejb3/PingServlet2Entity` | Servlet accesses a JPA entity directly. |
+| `PingServlet2Session2Entity` | `/ejb3/PingServlet2Session2Entity` | Full servlet → SLSB → JPA entity path. Retrieves a single row from the database through the complete EJB stack. |
+| `PingServlet2Session2EntityCollection` | `/ejb3/PingServlet2Session2EntityCollection` | Extends the previous test by calling a Session EJB that uses a JPQL query returning a collection of entity objects. Each object is rendered by the servlet. |
+| `PingServlet2Session2CMROne2One` | `/ejb3/PingServlet2Session2CMROne2One` | Traverses a JPA one-to-one relationship between two entity types. Measures the cost of navigating a single-valued association. |
+| `PingServlet2Session2CMROne2Many` | `/ejb3/PingServlet2Session2CMROne2Many` | Traverses a JPA one-to-many relationship. Measures the cost of loading a collection-valued association. |
+| `PingServlet2MDBQueue` | `/ejb3/PingServlet2MDBQueue` | Servlet posts a message to a JMS queue. The `TradeBrokerMDB` receives it asynchronously. Prints delivery statistics every 100th message. |
+| `PingServlet2MDBTopic` | `/ejb3/PingServlet2MDBTopic` | Servlet publishes a message to a JMS topic. The `TradeStreamerMDB` (and any other subscribers) receives it asynchronously. |
+| `PingServlet2TwoPhase` | `/ejb3/PingServlet2TwoPhase` | Drives a SLSB that performs a JPA entity lookup (DB access) and posts a JMS queue message within a single global XA transaction (two-phase commit). Measures 2PC coordination overhead. |
+| `PingEJBLocal` | _(EJB local)_ | Direct EJB local interface invocation overhead — no business logic, measures the container dispatch cost only. |
+| `PingEJBIFace` | _(EJB interface)_ | EJB local interface call via a no-interface view. |
+| `PingEJBLocalDecorator` | _(CDI decorator + EJB)_ | An EJB local call intercepted by a CDI decorator. Measures the combined overhead of CDI decorator interception on an EJB invocation. |
+
+<Note>
+  `PingServlet2MDBQueue` and `PingServlet2MDBTopic` are explicitly documented in the application as **not intended for performance testing**. They are provided for functional verification of the JMS/MDB path. Do not use them to derive throughput numbers.
+</Note>
+
+### CDI Primitives
+
+These primitives measure CDI injection, bean invocation, and `BeanManager` lookup costs.
+
+| Primitive | URL | Description |
+|---|---|---|
+| `PingServletCDI` | `/servlet/PingServletCDI` | Tests CDI injection into a servlet — multiple CDI injection points are resolved and invoked on every request. |
+| `PingCDIBean` | _(CDI bean)_ | Direct CDI managed bean invocation. |
+| `PingServletCDIBeanManagerViaCDICurrent` | `/servlet/PingServletCDIBeanManagerViaCDICurrent` | Looks up the CDI `BeanManager` using `CDI.current()` (the CDI 1.1 programmatic API). |
+| `PingServletCDIBeanManagerViaJNDI` | `/servlet/PingServletCDIBeanManagerViaJNDI` | Looks up the CDI `BeanManager` via JNDI (`java:comp/BeanManager`). Useful for comparing CDI API vs. JNDI lookup cost. |
+| `PingCDIJSFBean` | `/PingCDIJSF.faces` | A CDI managed bean invoked from a JSF Facelets page. Tests the combined CDI + JSF path. |
+
+### WebSocket Primitives
+
+These primitives measure WebSocket endpoint throughput and encode/decode overhead. Each is backed by a `@ServerEndpoint` implementation.
+
+| Primitive | Endpoint | Description |
+|---|---|---|
+| `PingWebSocketTextSync` | `/pingTextSync` | Synchronous text WebSocket echo. The `@OnMessage` handler calls `session.getBasicRemote().sendText()` to echo a hit counter back to the client. Measures synchronous send latency. |
+| `PingWebSocketTextAsync` | `/pingTextAsync` | Asynchronous text WebSocket. Uses `session.getAsyncRemote().sendText()` to send the response asynchronously. |
+| `PingWebSocketBinary` | `/pingBinary` | Binary WebSocket ping. Tests binary frame encode/decode and transport overhead. |
+| `PingWebSocketJson` | `/pingJson` | WebSocket with a JSON encoder and decoder (`javax.websocket.Encoder.Text` / `Decoder.Text`). Measures JSON serialization overhead within the WebSocket path. |
+
+The WebSocket primitive HTML pages (e.g., `PingWebSocketTextSync.html`) open a WebSocket connection in the browser and display the running hit count. For load testing, drive the WebSocket endpoint URL directly from JMeter using the WebSocket Samplers plugin.
+
+### Other Primitives
+
+| Primitive | URL | Description |
+|---|---|---|
+| `PingJSONP` | `/servlet/PingJSONP` | Generates and parses a JSON object using the `javax.json` (JSON-P) API. Measures JSON processing throughput without a WebSocket or HTTP client involved. |
+| `PingManagedExecutor` | `/servlet/PingManagedExecutor` | Submits work to a Java EE 7 `ManagedExecutorService` (Concurrency Utilities) inside an asynchronous servlet. Tests the concurrency utilities layer. |
+| `PingManagedThread` | `/servlet/PingManagedThread` | Creates a managed thread via `ManagedThreadFactory` inside an asynchronous servlet. Tests `ManagedThreadFactory` invocation overhead. |
+| `PingBean` | _(internal)_ | Simple JavaBean instantiation and access. Establishes a baseline for pure Java object overhead with no container involvement. |
+| `PingUpgradeServlet` | `/servlet/PingUpgradeServlet` | Tests a Servlet 3.1 `HttpUpgradeHandler` request. Requires JMeter for testing (cannot be driven from a browser). |
+| `ExplicitGC` | `/servlet/ExplicitGC` | Invokes `System.gc()` and reports heap statistics after collection completes. Use this to force a full GC before a measurement run to establish a clean heap baseline — not as a performance benchmark. |
+
+## Running Web Primitives
+
+The Web Primitives index page is installed automatically with the application. Open it at:
+
+```
+http://localhost:9082/daytrader/web_prmtv.html
+```
+
+Each primitive name on that page is a link that lets you invoke it once from the browser to verify it is working. For load testing, drive the individual primitive servlet URLs directly with any HTTP load tool:
+
+<CodeGroup>
+
+```bash Apache Bench (ab)
+# 10,000 requests, 50 concurrent connections, against PingServlet
+ab -n 10000 -c 50 http://myserver:9082/daytrader/servlet/PingServlet
+```
+
+```bash JMeter (non-GUI)
+# Drive PingJDBCRead for 60 seconds with 20 threads
+./jmeter -n -t my_primitives.jmx \
+  -JHOST=myserver \
+  -JPORT=9082 \
+  -JDURATION=60 \
+  -JTHREADS=20
+```
+
+</CodeGroup>
+
+To increase the number of operations performed per HTTP request, change the `primIterations` value on the DayTrader configuration page (`http://localhost:9082/daytrader/config`). The default is `1`. Raising this value reduces the relative cost of the HTTP transport and focuses the measurement on the component under test — particularly useful for EJB and JDBC primitives where the network round-trip would otherwise dominate.
+
+<Tip>
+  Use the primitives as a diagnostic stack trace under load. Start at the top of the stack and work down: if `PingServlet` achieves the expected requests-per-second but `PingJDBCRead` does not, the bottleneck is in the JDBC layer or the database, not the servlet container. If `PingJDBCRead` is fast but `PingServlet2Session2Entity` is slow, the EJB container or JPA flush overhead is the constraint.
+</Tip>

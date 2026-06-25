@@ -1,0 +1,359 @@
+---
+title: "Java EE 7 Features Exercised by DayTrader 7"
+sidebarTitle: "Java EE Features"
+description: "DayTrader 7 exercises 13 Java EE 7 specifications including EJB, JPA, JMS, WebSocket, JSF, CDI, and more — mapped to their usage in the application."
+---
+
+DayTrader 7 was designed to exercise as many Java EE 7 specifications as possible within a coherent, real-world trading workload. The `server.xml` `featureManager` block lists exactly 13 Liberty features that correspond to these specifications — every feature is actively used by either the core trading flow or by the Web Primitives micro-benchmark suite. This makes DayTrader 7 a valuable tool both for measuring aggregate application-server performance and for isolating per-specification bottlenecks.
+
+```xml
+<featureManager>
+    <feature>ejb-3.2</feature>
+    <feature>servlet-3.1</feature>
+    <feature>jsf-2.2</feature>
+    <feature>jpa-2.1</feature>
+    <feature>mdb-3.2</feature>
+    <feature>wasJmsServer-1.0</feature>
+    <feature>wasJmsClient-2.0</feature>
+    <feature>cdi-1.2</feature>
+    <feature>websocket-1.1</feature>
+    <feature>concurrent-1.0</feature>
+    <feature>jsonp-1.0</feature>
+    <feature>beanValidation-1.1</feature>
+    <feature>localConnector-1.0</feature>
+</featureManager>
+```
+
+---
+
+## Feature Reference
+
+### 1. EJB 3.2 — `ejb-3.2`
+
+Enterprise JavaBeans is the backbone of DayTrader 7's business tier. Three EJB component types are used together.
+
+**`TradeSLSBBean`** is a `@Stateless` session bean annotated with container-managed transactions. Every business method uses `@TransactionAttribute(REQUIRED)` by default, ensuring that a buy or sell and its associated JPA writes commit atomically. The `publishQuotePriceChange` method uses `@TransactionAttribute(REQUIRES_NEW)` to commit the JMS publish in a separate transaction.
+
+```java
+@Stateless
+@TransactionAttribute(TransactionAttributeType.REQUIRED)
+@TransactionManagement(TransactionManagementType.CONTAINER)
+public class TradeSLSBBean implements TradeSLSBRemote, TradeSLSBLocal {
+    // ...
+}
+```
+
+**`DTBroker3MDB`** and **`DTStreamer3MDB`** are `@MessageDriven` beans. `DTBroker3MDB` consumes the `TradeBrokerQueue` (point-to-point) to complete async orders; `DTStreamer3MDB` subscribes to the `TradeStreamerTopic` (pub/sub) to relay stock price events.
+
+```java
+@MessageDriven(activationConfig = {
+    @ActivationConfigProperty(propertyName = "destinationType",
+                              propertyValue = "javax.jms.Queue"),
+    @ActivationConfigProperty(propertyName = "destination",
+                              propertyValue = "TradeBrokerQueue") })
+public class DTBroker3MDB implements MessageListener { /* ... */ }
+```
+
+**`MarketSummarySingleton`** is an `@Singleton` EJB that uses `@Schedule` to refresh the market summary every 20 seconds and `@Lock(LockType.READ)` / `@Lock(LockType.WRITE)` to protect concurrent access to the cached `MarketSummaryDataBean`.
+
+```java
+@Singleton
+public class MarketSummarySingleton {
+
+    @Schedule(second = "*/20", minute = "*", hour = "*", persistent = false)
+    private void updateMarketSummary() { /* ... */ }
+
+    @Lock(LockType.READ)
+    public MarketSummaryDataBean getMarketSummaryDataBean() { /* ... */ }
+}
+```
+
+**Primitives:** `PingEJBLocal`, `PingEJBIFace`, `PingEJBLocalDecorator` in `web/prims/` isolate EJB invocation overhead.
+
+---
+
+### 2. JPA 2.1 — `jpa-2.1`
+
+The `daytrader` persistence unit (JTA-managed, bound to `jdbc/TradeDataSource`) contains five entity classes. `TradeSLSBBean` uses a container-injected `EntityManager` for all persistence operations.
+
+```java
+@PersistenceContext
+private EntityManager entityManager;
+```
+
+Key JPA patterns exercised:
+
+- **`entityManager.find()`** for every account, quote, and holding lookup.
+- **`entityManager.persist()`** for new orders, holdings, and accounts.
+- **`entityManager.merge()`** for profile and quote updates.
+- **`entityManager.remove()`** for completed sell-order holdings and long-run order cleanup.
+- **`@NamedQuery` / `@NamedNativeQuery`** — `quoteejb.allQuotes` (JPQL), `quoteejb.quoteForUpdate` (native `SELECT ... FOR UPDATE`), and multiple `orderejb.*` named queries.
+- **Criteria API** — `getHoldings()` and `getClosedOrders()` in `TradeSLSBBean` build queries with `CriteriaBuilder` and `CriteriaQuery<T>`.
+- **Optimistic locking** — every table has an `optLock` column; concurrent buy/sell operations on the same quote will cause `OptimisticLockException` under high concurrency, which the application handles via rollback.
+
+The L2 cache is disabled (`<shared-cache-mode>NONE</shared-cache-mode>`) so every read exercises the full JDBC path.
+
+---
+
+### 3. Servlet 3.1 — `servlet-3.1`
+
+Servlets provide the HTML-based trading interface and the automated benchmark scenario driver.
+
+| Servlet | Purpose |
+|---|---|
+| `TradeAppServlet` | Main user interface: login, buy, sell, portfolio, quotes |
+| `TradeScenarioServlet` | Automated benchmark scenario loop; drives random buy/sell/getQuote operations |
+| `TradeConfigServlet` | Runtime configuration panel (runtime mode, market summary interval, etc.) |
+
+**Primitives:** `PingServlet`, `PingServlet2DB`, `PingServlet2Jsp`, `PingServlet2Servlet`, `PingServlet30Async`, `PingServlet31Async`, `PingServlet31AsyncRead`, `PingUpgradeServlet`, and others isolate individual Servlet 3.x features including async context, non-blocking I/O reads (`ReadListener`), and HTTP Upgrade.
+
+---
+
+### 4. JSF 2.2 — `jsf-2.2`
+
+The JSF front-end provides a complete browser-based UI for authenticated trading. Managed beans use CDI scopes and are injected with `TradeAction` via producer methods.
+
+| Bean | Scope | Responsibility |
+|---|---|---|
+| `TradeAppJSF` | `@SessionScoped` | Login, logout, registration, buy, sell navigation |
+| `PortfolioJSF` | `@SessionScoped` | Portfolio and holdings display |
+| `OrderDataJSF` | `@SessionScoped` | Order history and status |
+| `QuoteJSF` | `@SessionScoped` | Quote lookup and display |
+| `AccountDataJSF` | `@SessionScoped` | Account balance and profile editing |
+| `MarketSummaryJSF` | `@SessionScoped` | Market summary panel |
+| `TradeConfigJSF` | `@ApplicationScoped` | Configuration panel backed by `TradeConfig` |
+
+**Primitive:** `PingCDIJSFBean` tests JSF + CDI integration.
+
+---
+
+### 5. CDI 1.2 — `cdi-1.2`
+
+CDI wires the JSF and WebSocket tiers together and bridges JMS messaging to the WebSocket endpoint without tight coupling.
+
+**Producer methods** eliminate JNDI lookups from JSF beans:
+
+```java
+// TradeActionProducer.java
+public class TradeActionProducer {
+    @Produces
+    public TradeAction getTradeAction() {
+        return new TradeAction();
+    }
+}
+
+// ExternalContextProducer.java
+public class ExternalContextProducer {
+    @Produces
+    public ExternalContext getExternalContext() {
+        return FacesContext.getCurrentInstance().getExternalContext();
+    }
+}
+```
+
+**CDI Events** bridge `DTStreamer3MDB` to `MarketSummaryWebSocket` without any direct dependency. The MDB fires an event; the WebSocket endpoint observes it:
+
+```java
+// DTStreamer3MDB.java — fires the event
+@Inject
+@WebSocketJMSMessage
+Event<Message> jmsEvent;
+
+jmsEvent.fire(message);   // inside onMessage()
+
+// MarketSummaryWebSocket.java — observes the event
+public static void onJMSMessage(@Observes @WebSocketJMSMessage Message message) {
+    RecentStockChangeList.addStockChange(message);
+    sendRecentQuotePriceChangeList = true;
+}
+```
+
+**`JSFLoginFilter`** is a CDI-managed servlet filter that protects the JSF pages from unauthenticated access.
+
+**Primitives:** `PingCDIBean`, `PingServletCDI`, `PingServletCDIBeanManagerViaCDICurrent`, `PingServletCDIBeanManagerViaJNDI`.
+
+---
+
+### 6. JMS 2.0 / MDB 3.2 — `mdb-3.2`
+
+Asynchronous order processing is the primary use of JMS. `TradeSLSBBean` uses the JMS 2.0 simplified API (`JMSContext`) to send messages to both destinations.
+
+**Point-to-point (queue) — async order completion:**
+
+```java
+// TradeSLSBBean.queueOrder() — sends to TradeBrokerQueue
+try (JMSContext queueContext = queueConnectionFactory.createContext()) {
+    TextMessage message = queueContext.createTextMessage();
+    message.setStringProperty("command", "neworder");
+    message.setIntProperty("orderID", orderID);
+    message.setBooleanProperty("twoPhase", twoPhase);
+    queueContext.createProducer().send(tradeBrokerQueue, message);
+}
+```
+
+**Pub/sub (topic) — price change streaming:**
+
+```java
+// TradeSLSBBean.publishQuotePriceChange() — sends to TradeStreamerTopic
+try (JMSContext topicContext = topicConnectionFactory.createContext()) {
+    TextMessage message = topicContext.createTextMessage();
+    message.setStringProperty("command", "updateQuote");
+    message.setStringProperty("symbol", quote.getSymbol());
+    message.setStringProperty("price", quote.getPrice().toString());
+    // ... additional properties ...
+    topicContext.createProducer().send(tradeStreamerTopic, message);
+}
+```
+
+The Liberty embedded messaging engine (`wasJmsServer-1.0`) provides `TradeBrokerQueue` and `TradeTopicSpace` without an external broker.
+
+**Primitives:** `PingServlet2MDBQueue`, `PingServlet2MDBTopic` in `web/prims/ejb3/`.
+
+---
+
+### 7. WebSocket 1.1 — `websocket-1.1`
+
+`MarketSummaryWebSocket` is a `@ServerEndpoint` that maintains a static `CopyOnWriteArrayList<Session>` of all connected browser clients. It starts a `ManagedScheduledExecutorService`-based scheduler when the first client connects, and cancels it when the last client disconnects.
+
+```java
+@ServerEndpoint(value = "/marketsummary", decoders = ActionDecoder.class)
+public class MarketSummaryWebSocket {
+
+    @OnOpen
+    public void onOpen(Session session, EndpointConfig ec) { /* ... */ }
+
+    @OnMessage
+    public void sendMarketSummary(ActionMessage message, Session currentSession) { /* ... */ }
+
+    @OnClose
+    public void onClose(Session session, CloseReason reason) { /* ... */ }
+
+    @OnError
+    public void onError(Throwable t, Session currentSession) { /* ... */ }
+}
+```
+
+When a CDI event arrives from `DTStreamer3MDB`, the scheduler wakes up and pushes JSON-encoded stock price changes to every open session using `session.getBasicRemote().sendText(json)`.
+
+**Primitives:** `PingWebSocketTextSync`, `PingWebSocketTextAsync`, `PingWebSocketBinary`, `PingWebSocketJson` benchmark raw WebSocket throughput for text, async text, binary, and JSON payloads.
+
+---
+
+### 8. Concurrency Utilities 1.0 — `concurrent-1.0`
+
+Two managed concurrency objects are injected by the container.
+
+**`ManagedThreadFactory`** in `TradeSLSBBean` enables the `ASYNCH_MANAGEDTHREAD` order processing mode, where order completion runs in a container-aware managed thread instead of a JMS queue:
+
+```java
+@Resource
+private ManagedThreadFactory managedThreadFactory;
+
+// In queueOrder() when mode == ASYNCH_MANAGEDTHREAD:
+Thread thread = managedThreadFactory.newThread(new CompleteOrderThread(orderID, twoPhase));
+thread.start();
+```
+
+**`ManagedScheduledExecutorService`** in `MarketSummaryWebSocket` drives the periodic push scheduler for WebSocket clients:
+
+```java
+@Resource
+private ManagedScheduledExecutorService managedScheduledExecutorService;
+
+scheduler = managedScheduledExecutorService.scheduleAtFixedRate(
+    () -> { /* push stock changes */ },
+    1, SCHEDULER_PERIOD, TimeUnit.SECONDS);
+```
+
+**Primitives:** `PingManagedExecutor` (exercises `ManagedExecutorService` via async servlet) and `PingManagedThread` (exercises `ManagedThreadFactory` directly).
+
+---
+
+### 9. JSONP 1.0 — `jsonp-1.0`
+
+JSON-P is used to serialize market summary and stock price change data for WebSocket delivery. `MarketSummaryWebSocket` uses `Json.createObjectBuilder()` to merge two JSON objects before broadcasting:
+
+```java
+// MarketSummaryWebSocket.mergeJsonObjects()
+JsonObjectBuilder jObjectBuilder = Json.createObjectBuilder();
+// ... iterates key sets of both objects and adds to builder ...
+return jObjectBuilder.build();
+```
+
+The `RecentStockChangeList` utility also uses the JSON-P API to build the per-symbol change list sent as a `JsonObject` string over the WebSocket.
+
+**Primitive:** `PingJSONP` — a servlet that uses `JsonGenerator` (streaming write) and `JsonParser` (streaming read) to benchmark raw JSON-P throughput.
+
+---
+
+### 10. Bean Validation 1.1 — `beanValidation-1.1`
+
+Bean Validation constraints are declared on the JPA entities and validated by the JSF tier at form submission time.
+
+- `AccountDataBean` — `@NotNull` on `loginCount` and `logoutCount`.
+- `HoldingDataBean` — `@NotNull` on `quantity`.
+- `OrderDataBean` — `@NotNull` on `quantity`.
+- `QuoteDataBean` — `@NotNull` on `volume` and `change1`.
+- `AccountProfileDataBean` — `@NotNull` on `userID`.
+
+The `LoginValidator` JSF validator provides additional application-level validation for the login form, enforcing password length and format rules using Bean Validation internally.
+
+---
+
+### 11. Embedded JMS Messaging — `wasJmsServer-1.0` / `wasJmsClient-2.0`
+
+The Liberty `wasJmsServer-1.0` feature embeds a full JMS messaging engine directly in the server process, eliminating the need for an external broker. `wasJmsClient-2.0` provides the client-side connection factories and destination resources used by `TradeSLSBBean`.
+
+The messaging engine configuration in `server.xml` defines:
+
+```xml
+<messagingEngine id="defaultME">
+    <queue id="TradeBrokerQueue"/>
+    <topicSpace id="TradeTopicSpace"/>
+</messagingEngine>
+
+<jmsQueue id="jms/TradeBrokerQueue" jndiName="jms/TradeBrokerQueue">
+    <properties.wasJms deliveryMode="NonPersistent" queueName="TradeBrokerQueue"/>
+</jmsQueue>
+
+<jmsTopic id="TradeStreamerTopic" jndiName="jms/TradeStreamerTopic">
+    <properties.wasJms deliveryMode="NonPersistent" topicSpace="TradeTopicSpace"/>
+</jmsTopic>
+```
+
+Both destinations use `NonPersistent` delivery to maximize throughput (messages are not journalled to disk), which is appropriate for a benchmark workload.
+
+---
+
+### 12. Local Connector — `localConnector-1.0`
+
+The Liberty `localConnector-1.0` feature enables local JMX-based management and admin connectivity. It is required for Liberty administration tooling and for certain management operations used by the DayTrader configuration and reset servlets when running within a Liberty server.
+
+---
+
+## Web Primitives Coverage
+
+<Note>
+The `daytrader-ee7-web` module contains a dedicated package of isolated micro-benchmark servlets at `com.ibm.websphere.samples.daytrader.web.prims`. Each servlet exercises a single Java EE feature in isolation, making it straightforward to attribute a performance change to a specific specification without the noise of the full trading workload.
+</Note>
+
+The primitives suite covers all 13 feature areas listed above and several additional cross-cutting concerns:
+
+| Category | Key Primitives |
+|---|---|
+| Servlet baseline | `PingServlet`, `PingServletWriter`, `PingServletSetContentLength` |
+| Async Servlet | `PingServlet30Async`, `PingServlet31Async`, `PingServlet31AsyncRead` |
+| JDBC | `PingJDBCRead`, `PingJDBCRead2JSP`, `PingJDBCWrite`, `PingServlet2DB` |
+| EJB | `PingEJBLocal`, `PingEJBIFace`, `PingEJBLocalDecorator` |
+| CDI | `PingCDIBean`, `PingServletCDI`, `PingCDIJSFBean` |
+| JMS / MDB | `PingServlet2MDBQueue`, `PingServlet2MDBTopic` |
+| WebSocket | `PingWebSocketTextSync`, `PingWebSocketTextAsync`, `PingWebSocketBinary`, `PingWebSocketJson` |
+| JSON-P | `PingJSONP` |
+| Concurrency | `PingManagedExecutor`, `PingManagedThread` |
+| JSP | `PingServlet2Jsp`, `PingServlet2Include` |
+| Session | `PingSession1`, `PingSession2`, `PingSession3`, `PingSession3Object` |
+| HTTP Upgrade | `PingUpgradeServlet` |
+
+<Tip>
+Run a single primitive servlet in isolation (e.g., `GET /daytrader/servlet/PingJSONP`) to establish a baseline for one specification, then compare against the full `TradeScenarioServlet` to quantify the overhead contributed by transaction management, persistence, and messaging.
+</Tip>
