@@ -1,7 +1,7 @@
 ---
 title: "DayTrader 7 Runtime Modes and Order Processing Configuration"
 sidebarTitle: "Runtime Modes"
-description: "Configure DayTrader 7 runtime mode (EJB3 vs Direct JDBC), order processing mode (Sync vs Async), and other runtime parameters via the configuration servlet."
+description: "Configure DayTrader 7 runtime mode (EJB3 vs Direct JDBC), order processing mode (Sync vs Async), and runtime parameters via the configuration servlet."
 ---
 
 DayTrader 7 supports multiple runtime modes that fundamentally change how business logic executes — from fully-managed EJB transactions backed by JPA down to raw JDBC calls that bypass the EJB container entirely. These modes, along with a rich set of secondary parameters, are configured at runtime through the `/daytrader/config` page served by `TradeConfigServlet`. All settings are held as static fields on the `TradeConfig` class and are therefore JVM-scoped: they reset to their defaults on every server restart. To make a setting permanent, declare the corresponding init parameter on the relevant servlet in `web.xml`.
@@ -96,7 +96,7 @@ The following parameters are also exposed on the `/daytrader/config` page and st
 |-----------|---------|-------------|
 | `marketSummaryInterval` | `20` (seconds) | How often the cached market summary is refreshed. `-1` means recalculate on every request; `0` means never recalculate (serve the cached value indefinitely); any positive integer is the minimum number of seconds between refreshes. |
 | `publishQuotePriceChange` | `true` | When `true`, every buy or sell that changes a quote's price publishes a JMS message to `jms/TradeStreamerTopic`. `TradeStreamerMDB` then forwards the payload to connected WebSocket clients via `TradeWebsocket`. |
-| `percentSentToWebsocket` | `5` (percent) | Percentage of quote price-change notifications that are actually forwarded to WebSocket sessions. Reducing this value lowers WebSocket overhead without disabling the feature entirely. |
+| `percentSentToWebsocket` | `10` (percent) | Percentage of quote price-change notifications that are actually forwarded to WebSocket sessions. Reducing this value lowers WebSocket overhead without disabling the feature entirely. |
 
 </Accordion>
 
@@ -160,6 +160,8 @@ maxQuotes=10000
 publishQuotePriceChange=true
 percentSentToWebsocket=10
 displayOrderAlerts=true
+cachingType=1
+cacheSize=100000
 orderProcessingMode=0
 webInterface=0
 marketSummaryInterval=20

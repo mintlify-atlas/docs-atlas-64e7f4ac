@@ -1,5 +1,5 @@
 ---
-title: "Java EE 7 Features Exercised by DayTrader 7"
+title: "Java EE 7 Features in DayTrader 7: All 13 Liberty Features"
 sidebarTitle: "Java EE Features"
 description: "DayTrader 7 exercises 13 Java EE 7 specifications including EJB, JPA, JMS, WebSocket, JSF, CDI, and more — mapped to their usage in the application."
 ---
@@ -89,7 +89,7 @@ Key JPA patterns exercised:
 - **`entityManager.remove()`** for completed sell-order holdings and long-run order cleanup.
 - **`@NamedQuery` / `@NamedNativeQuery`** — `quoteejb.allQuotes` (JPQL), `quoteejb.quoteForUpdate` (native `SELECT ... FOR UPDATE`), and multiple `orderejb.*` named queries.
 - **Criteria API** — `getHoldings()` and `getClosedOrders()` in `TradeSLSBBean` build queries with `CriteriaBuilder` and `CriteriaQuery<T>`.
-- **Optimistic locking** — every table has an `optLock` column; concurrent buy/sell operations on the same quote will cause `OptimisticLockException` under high concurrency, which the application handles via rollback.
+- **Schema `optLock` column** — every table has an `optLock` integer column in the DDL, but it is not mapped to a `@Version` field in the entity classes. Concurrent buy/sell operations on the same quote are instead serialized via the `SELECT ... FOR UPDATE` native query (`quoteejb.quoteForUpdate`).
 
 The L2 cache is disabled (`<shared-cache-mode>NONE</shared-cache-mode>`) so every read exercises the full JDBC path.
 
@@ -137,7 +137,8 @@ CDI wires the JSF and WebSocket tiers together and bridges JMS messaging to the 
 // TradeActionProducer.java
 public class TradeActionProducer {
     @Produces
-    public TradeAction getTradeAction() {
+    @RequestScoped
+    public TradeAction produceTradeAction() {
         return new TradeAction();
     }
 }
@@ -145,7 +146,8 @@ public class TradeActionProducer {
 // ExternalContextProducer.java
 public class ExternalContextProducer {
     @Produces
-    public ExternalContext getExternalContext() {
+    @RequestScoped
+    public ExternalContext produceFacesExternalContext() {
         return FacesContext.getCurrentInstance().getExternalContext();
     }
 }
@@ -168,7 +170,7 @@ public static void onJMSMessage(@Observes @WebSocketJMSMessage Message message) 
 }
 ```
 
-**`JSFLoginFilter`** is a CDI-managed servlet filter that protects the JSF pages from unauthenticated access.
+**`JSFLoginFilter`** is a `@WebFilter(urlPatterns = "*.faces")` servlet filter that protects JSF pages from unauthenticated access by checking the HTTP session before forwarding requests.
 
 **Primitives:** `PingCDIBean`, `PingServletCDI`, `PingServletCDIBeanManagerViaCDICurrent`, `PingServletCDIBeanManagerViaJNDI`.
 
@@ -296,7 +298,7 @@ Bean Validation constraints are declared on the JPA entities and validated by th
 - `QuoteDataBean` — `@NotNull` on `volume` and `change1`.
 - `AccountProfileDataBean` — `@NotNull` on `userID`.
 
-The `LoginValidator` JSF validator provides additional application-level validation for the login form, enforcing password length and format rules using Bean Validation internally.
+The `LoginValidator` JSF validator (`@FacesValidator("loginValidator")`) validates that the login username matches the expected format (`uid:\d+`) using a regular expression check.
 
 ---
 

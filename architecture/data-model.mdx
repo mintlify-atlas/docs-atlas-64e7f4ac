@@ -1,13 +1,13 @@
 ---
-title: "DayTrader 7 JPA Data Model and Database Schema"
+title: "DayTrader 7 JPA Entities: Data Model and SQL Schema"
 sidebarTitle: "Data Model"
 description: "Explore DayTrader 7's five JPA entities — Account, AccountProfile, Quote, Holding, and Order — with their fields, relationships, and SQL schema."
 ---
 
-DayTrader 7 uses five JPA 2.1 entities mapped to relational database tables within the `daytrader` persistence unit (configured in `daytrader-ee7-ejb/src/main/resources/META-INF/persistence.xml`, using the `jdbc/TradeDataSource` JTA data source). Every table includes an `optLock` integer column that JPA uses for optimistic locking to guard against lost updates under concurrent trading load. The DDL for all tables is provided in `daytrader-ee7-ejb/src/main/resources/META-INF/daytrader.sql`. Primary keys for `AccountDataBean`, `HoldingDataBean`, and `OrderDataBean` are generated using a shared table-based generator (`KEYGENEJB`), avoiding database-sequence contention.
+DayTrader 7 uses five JPA 2.1 entities mapped to relational database tables within the `daytrader` persistence unit (configured in `daytrader-ee7-ejb/src/main/resources/META-INF/persistence.xml`, using the `jdbc/TradeDataSource` JTA data source). Every table includes an `optLock` integer column in the DDL schema; this column is present for schema compatibility but is not mapped to a `@Version` field in the current entity classes. The DDL for all tables is provided in `daytrader-ee7-ejb/src/main/resources/META-INF/daytrader.sql`. Primary keys for `AccountDataBean`, `HoldingDataBean`, and `OrderDataBean` are generated using a shared table-based generator (`KEYGENEJB`), avoiding database-sequence contention.
 
 <Note>
-The JPA shared second-level cache is explicitly disabled (`<shared-cache-mode>NONE</shared-cache-mode>`) so that every read goes to the database, producing a more representative benchmark workload and ensuring all five entities are exercised on every transaction.
+The JPA shared second-level cache is explicitly disabled (`<shared-cache-mode>NONE</shared-cache-mode>`) in `persistence.xml` so that every read goes to the database, producing a more representative benchmark workload.
 </Note>
 
 ---
@@ -24,14 +24,19 @@ The JPA shared second-level cache is explicitly disabled (`<shared-cache-mode>NO
 @Table(name = "accountejb")
 public class AccountDataBean implements Serializable {
 
+    @TableGenerator(name = "accountIdGen", table = "KEYGENEJB",
+        pkColumnName = "KEYNAME", valueColumnName = "KEYVAL",
+        pkColumnValue = "account", allocationSize = 1000)
     @Id
     @GeneratedValue(strategy = GenerationType.TABLE, generator = "accountIdGen")
     @Column(name = "ACCOUNTID", nullable = false)
     private Integer accountID;
 
+    @NotNull
     @Column(name = "LOGINCOUNT", nullable = false)
     private int loginCount;
 
+    @NotNull
     @Column(name = "LOGOUTCOUNT", nullable = false)
     private int logoutCount;
 
@@ -49,15 +54,15 @@ public class AccountDataBean implements Serializable {
     @Column(name = "OPENBALANCE")
     private BigDecimal openBalance;
 
-    @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "PROFILE_USERID")
-    private AccountProfileDataBean profile;
-
     @OneToMany(mappedBy = "account", fetch = FetchType.LAZY)
     private Collection<OrderDataBean> orders;
 
     @OneToMany(mappedBy = "account", fetch = FetchType.LAZY)
     private Collection<HoldingDataBean> holdings;
+
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "PROFILE_USERID")
+    private AccountProfileDataBean profile;
 }
 ```
 
@@ -91,7 +96,7 @@ create index profile_userid on accountejb(profile_userid);
 | `BALANCE` | `decimal(10,2)` | Current cash balance; debited on buy, credited on sell |
 | `OPENBALANCE` | `decimal(10,2)` | Initial deposit balance; never modified after registration |
 | `PROFILE_USERID` | `varchar(250)` | FK → `accountprofileejb.userid` |
-| `optLock` | `integer` | JPA optimistic-lock version column |
+| `optLock` | `integer` | Schema column (not mapped to a `@Version` field in the entity) |
 
 **Relationships:**
 - `@OneToOne` (lazy) → `AccountProfileDataBean` via `PROFILE_USERID`
@@ -160,7 +165,7 @@ alter table accountprofileejb
 | `ADDRESS` | `varchar(250)` | Street address |
 | `EMAIL` | `varchar(250)` | Email address |
 | `CREDITCARD` | `varchar(250)` | Credit card number used during registration |
-| `optLock` | `integer` | JPA optimistic-lock version column |
+| `optLock` | `integer` | Schema column (not mapped to a `@Version` field in the entity) |
 
 **Relationships:**
 - `@OneToOne` (lazy, inverse side, mapped by `profile`) → `AccountDataBean`
@@ -242,7 +247,7 @@ alter table quoteejb
 | `LOW` | `decimal(10,2)` | Intraday low |
 | `HIGH` | `decimal(10,2)` | Intraday high |
 | `CHANGE1` | `double NOT NULL` | `price − open1`; updated on each trade |
-| `optLock` | `integer` | JPA optimistic-lock version column |
+| `optLock` | `integer` | Schema column (not mapped to a `@Version` field in the entity) |
 
 **Relationships:**  
 Referenced (as the `quote` side) by `@ManyToOne` from `HoldingDataBean` and `OrderDataBean`. No back-reference is stored in `QuoteDataBean` itself.
@@ -312,7 +317,7 @@ create index account_accountid on holdingejb(account_accountid);
 | `PURCHASEDATE` | `timestamp` | Date/time of purchase; set to `Timestamp(0)` when inflight for sale |
 | `ACCOUNT_ACCOUNTID` | `integer` | FK → `accountejb.accountid` |
 | `QUOTE_SYMBOL` | `varchar(250)` | FK → `quoteejb.symbol` |
-| `optLock` | `integer` | JPA optimistic-lock version column |
+| `optLock` | `integer` | Schema column (not mapped to a `@Version` field in the entity) |
 
 **Relationships:**
 - `@ManyToOne` (lazy) → `AccountDataBean` via `ACCOUNT_ACCOUNTID`
@@ -413,7 +418,7 @@ create index ordertype          on orderejb(ordertype);
 | `ACCOUNT_ACCOUNTID` | `integer` | FK → `accountejb.accountid` |
 | `QUOTE_SYMBOL` | `varchar(250)` | FK → `quoteejb.symbol` |
 | `HOLDING_HOLDINGID` | `integer` | FK → `holdingejb.holdingid`; `NULL` for open orders |
-| `optLock` | `integer` | JPA optimistic-lock version column |
+| `optLock` | `integer` | Schema column (not mapped to a `@Version` field in the entity) |
 
 **Relationships:**
 - `@ManyToOne` (lazy) → `AccountDataBean` via `ACCOUNT_ACCOUNTID`

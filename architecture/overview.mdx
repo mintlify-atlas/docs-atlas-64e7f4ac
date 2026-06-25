@@ -1,5 +1,5 @@
 ---
-title: "DayTrader 7 Application Architecture Overview"
+title: "DayTrader 7 Architecture Overview: Modules and Request Flow"
 sidebarTitle: "Overview"
 description: "Understand DayTrader 7's layered architecture: web tier, EJB business layer, JPA entities, JMS messaging, and WebSocket push notifications."
 ---
@@ -20,7 +20,7 @@ This module contains the complete server-side business and persistence tier:
 
 - **`TradeServices`** — the central business interface declaring every brokerage operation: `login`, `logout`, `register`, `buy`, `sell`, `getQuote`, `getHoldings`, `getOrders`, `getMarketSummary`, and more.
 - **`TradeAction`** — a servlet-facing facade that implements `TradeServices` and delegates to the configured runtime implementation (`TradeSLSBBean` via local or remote EJB interface, or `TradeDirect` for JDBC mode). It also handles market-summary caching logic for non-EJB3 modes.
-- **`TradeSLSBBean`** — the primary EJB 3 `@Stateless` session bean implementation of `TradeServices`, backed by a JPA `EntityManager` and a `ManagedThreadFactory` for async order processing.
+- **`TradeSLSBBean`** — the primary EJB 3 `@Stateless` session bean that implements `TradeSLSBLocal` and `TradeSLSBRemote` (both of which extend `TradeServices`), backed by a JPA `EntityManager` and a `ManagedThreadFactory` for async order processing.
 - **`TradeDirect`** — an alternative direct JDBC/JMS implementation of `TradeServices`, used when the runtime mode is set to `DIRECT`.
 - **JPA entities** — `AccountDataBean`, `AccountProfileDataBean`, `QuoteDataBean`, `HoldingDataBean`, and `OrderDataBean` (see [Data Model](/architecture/data-model)).
 - **`DTBroker3MDB`** — a `@MessageDriven` bean consuming `TradeBrokerQueue` (point-to-point) to complete asynchronous buy/sell orders.
@@ -55,11 +55,11 @@ The user submits a buy or sell form via a JSF page (rendered by `TradeAppJSF`) o
 The servlet or JSF bean instantiates `TradeAction`, which acts as the facade for all `TradeServices` operations. `TradeAction` determines the configured runtime mode (EJB3 or DIRECT) and selects the appropriate delegate.
 
 ### TradeAction delegates to TradeServices implementation
-- **EJB3 mode**: `TradeAction` calls `TradeSLSBLocal.buy(userID, symbol, quantity, orderProcessingMode)` via the local EJB interface. Container-managed transactions are applied via `@TransactionAttribute(REQUIRED)`.
-- **Direct mode**: `TradeAction` calls `TradeDirect.buy(...)` which uses JDBC directly against `jdbc/TradeDataSource`.
+- **EJB3 mode**: `TradeAction` looks up `TradeSLSBLocal` (the `@Local` EJB interface that extends `TradeServices`) from JNDI and stores it in its `trade` field; it then calls `trade.buy(userID, symbol, quantity, orderProcessingMode)`. Container-managed transactions are applied via `@TransactionAttribute(REQUIRED)`.
+- **Direct mode**: `TradeAction` instantiates `TradeDirect` and calls `trade.buy(...)`, which uses JDBC directly against `jdbc/TradeDataSource`.
 
 ### TradeSLSBBean processes the order synchronously or asynchronously
-`TradeSLSBBean.buy()` looks up the `AccountProfileDataBean` and `QuoteDataBean` via the JPA `EntityManager`, creates an `OrderDataBean` with status `"open"`, and debits the account balance.
+`TradeSLSBBean.buy()` calls `entityManager.find(AccountProfileDataBean.class, userID)` to load the profile, navigates to the `AccountDataBean` via `profile.getAccount()`, and calls `entityManager.find(QuoteDataBean.class, symbol)` for the current quote. It then creates an `OrderDataBean` with status `"open"` and debits the account balance.
 
 - **Synchronous** (`SYNCH` mode): `completeOrder(orderID, false)` is called in the same transaction, creating the `HoldingDataBean` and marking the order `"closed"`.
 - **Asynchronous** (`ASYNCH` or `ASYNCH_2PHASE` mode): `queueOrder(orderID, twoPhase)` sends a JMS `TextMessage` to `TradeBrokerQueue` via `QueueConnectionFactory`.
@@ -69,7 +69,7 @@ The servlet or JSF bean instantiates `TradeAction`, which acts as the facade for
 `DTBroker3MDB.onMessage()` receives the `"neworder"` message from `TradeBrokerQueue`, extracts the `orderID`, and calls `TradeSLSBLocal.completeOrder(orderID, twoPhase)` — creating the holding for a buy or removing it for a sell, and setting the order status to `"closed"`.
 
 ### Quote price update and pub/sub notification
-After every buy or sell, `TradeAction` calls `updateQuotePriceVolume()`, which updates the `QuoteDataBean`'s `price`, `change1`, and `volume` fields, then calls `publishQuotePriceChange()` to send a `TextMessage` to `TradeStreamerTopic`.
+After every buy or sell, `TradeAction.buy()` (or `sell()`) calls `trade.updateQuotePriceVolume()` — which, in EJB3 mode, runs inside `TradeSLSBBean.updateQuotePriceVolume()`. That method executes the `quoteejb.quoteForUpdate` native query (`SELECT ... FOR UPDATE`), updates the `QuoteDataBean`'s `price`, `change1`, and `volume` fields, and then calls `publishQuotePriceChange()` (in a `REQUIRES_NEW` transaction) to send a `TextMessage` to `jms/TradeStreamerTopic`.
 
 ### DTStreamer3MDB fires a CDI event
 `DTStreamer3MDB.onMessage()` receives the `"updateQuote"` message from `TradeStreamerTopic` and, for a configurable percentage of symbols, fires a CDI `Event<Message>` annotated with `@WebSocketJMSMessage`.
@@ -87,7 +87,7 @@ After every buy or sell, `TradeAction` calls `updateQuotePriceVolume()`, which u
 |---|---|---|
 | `TradeServices` | `com.ibm.websphere.samples.daytrader` | Central business interface defining all brokerage operations |
 | `TradeAction` | `com.ibm.websphere.samples.daytrader` | Servlet/JSF-facing facade; delegates to configured `TradeServices` impl |
-| `TradeSLSBBean` | `...ejb3` | `@Stateless` EJB implementing `TradeServices` with JPA and JMS |
+| `TradeSLSBBean` | `...ejb3` | `@Stateless` EJB implementing `TradeSLSBLocal`/`TradeSLSBRemote` (extends `TradeServices`) with JPA and JMS |
 | `TradeDirect` | `...direct` | JDBC/JMS implementation of `TradeServices` for `DIRECT` mode |
 | `DTBroker3MDB` | `...ejb3` | `@MessageDriven` bean on `TradeBrokerQueue`; completes async orders |
 | `DTStreamer3MDB` | `...ejb3` | `@MessageDriven` bean on `TradeStreamerTopic`; fires CDI events to WebSocket |

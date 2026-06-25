@@ -1,5 +1,5 @@
 ---
-title: "Load Testing DayTrader 7 with Apache JMeter"
+title: "DayTrader 7 Load Testing with Apache JMeter Test Plans"
 sidebarTitle: "JMeter"
 description: "Configure and run the DayTrader 7 JMeter test plans for HTTP and WebSocket load generation, with all available command-line options."
 ---
@@ -31,10 +31,10 @@ All configurable options are passed with the `-J` flag on the JMeter command lin
 |---|---|---|
 | `HOST` | `localhost` | Hostname or IP address of the machine running the DayTrader application server. |
 | `PORT` | `9082` | HTTP port of the DayTrader application server. |
-| `PROTOCOL` | _(none)_ | Transport protocol: `http` or `https`. Always specify this explicitly. |
+| `PROTOCOL` | `http` | Transport protocol: `http` or `https`. |
 | `THREADS` | `50` | Number of concurrent JMeter threads (virtual users). |
 | `RAMP` | `0` | Ramp-up time in seconds for starting all threads. Set to the same value as `THREADS` for a smoother startup that avoids a thundering-herd effect at `t=0`. |
-| `DURATION` | _(required)_ | How long to run the test, in seconds. The standard benchmark window is `180`. |
+| `DURATION` | `180` | How long to run the test, in seconds. The standard benchmark window is `180`. |
 | `MAXTHINKTIME` | `0` | Maximum think time in milliseconds between requests per thread. `0` means no delay — threads issue requests as fast as the server responds. |
 | `STOCKS` | `9999` | Total number of stocks in the database, minus one. The default assumes 10,000 stocks (`s:0` – `s:9999`). |
 | `BOTUID` | `0` | Lowest user ID number. Users are named `uid:<n>`. |

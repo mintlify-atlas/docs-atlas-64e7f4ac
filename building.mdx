@@ -1,10 +1,10 @@
 ---
-title: "Building DayTrader 7 with Maven or Gradle"
+title: "Building DayTrader 7: Maven Multi-Module Project Guide"
 sidebarTitle: "Building"
-description: "Build the DayTrader 7 EAR artifact using Maven or Gradle, and understand the multi-module project structure."
+description: "Build the DayTrader 7 EAR artifact with Maven, understand the three-module project structure, and find key output paths for Liberty deployment."
 ---
 
-DayTrader 7 is organised as a Maven multi-module project with a root parent POM that coordinates three sub-modules built in dependency order. The root POM (`sample.daytrader7/pom.xml`) declares the module list and shared build metadata; each sub-module owns its own `pom.xml` with module-specific dependencies, plugins, and packaging configuration. Both Maven and Gradle are supported build systems.
+DayTrader 7 is organised as a Maven multi-module project with a root parent POM that coordinates three sub-modules built in dependency order. The root POM (`sample.daytrader7/pom.xml`) declares the module list and shared build metadata; each sub-module owns its own `pom.xml` with module-specific dependencies, plugins, and packaging configuration.
 
 ## Project Module Structure
 
@@ -17,8 +17,11 @@ sample.daytrader7/                  ← Parent POM (groupId: net.wasdev.wlp.samp
 │   └── src/main/java/              ← Business logic, JPA entities, JMS MDBs
 │       └── com/ibm/websphere/samples/daytrader/
 │           ├── TradeServices.java  ← Core service interface (login, buy, sell, quotes…)
-│           ├── Trade.java          ← EJB3 stateless session bean implementation
-│           ├── TradeDirect.java    ← Direct JDBC/JMS implementation
+│           ├── TradeAction.java    ← Client-side façade; routes to EJB3 or Direct mode
+│           ├── ejb3/               ← EJB3 stateless session bean implementation
+│           │   └── TradeSLSBBean.java
+│           ├── direct/             ← Direct JDBC/JMS implementation
+│           │   └── TradeDirect.java
 │           ├── entities/           ← JPA entities (Account, Holding, Order, Quote…)
 │           └── util/TradeConfig.java ← Runtime configuration (mode, DB scaling params)
 ├── daytrader-ee7-web/              ← WAR module
@@ -34,27 +37,23 @@ sample.daytrader7/                  ← Parent POM (groupId: net.wasdev.wlp.samp
 
 **Module responsibilities:**
 
-- **`daytrader-ee7-ejb`** — Contains all business logic and data-access code: the `TradeServices` interface, the Full EJB3 implementation (`Trade`), the Direct JDBC/JMS implementation (`TradeDirect`), all JPA entities (`AccountDataBean`, `HoldingDataBean`, `OrderDataBean`, `QuoteDataBean`), and the JMS Message-Driven Beans that process asynchronous orders.
+- **`daytrader-ee7-ejb`** — Contains all business logic and data-access code: the `TradeServices` interface, the Full EJB3 implementation (`TradeSLSBBean`), the Direct JDBC/JMS implementation (`TradeDirect`), all JPA entities (`AccountDataBean`, `HoldingDataBean`, `OrderDataBean`, `QuoteDataBean`), and the JMS Message-Driven Beans that process asynchronous orders.
 - **`daytrader-ee7-web`** — Contains the web tier: JSF-backed pages, JSP views, Servlet controllers (including the scenario driver at `/daytrader/scenario`), CDI managed beans, WebSocket server endpoints for real-time quote price push, and Bean Validation constraints on form inputs.
 - **`daytrader-ee7`** — The EAR assembler. Packages the EJB JAR and WAR into `daytrader-ee7.ear`, maps the WAR context root to `/daytrader`, and contains the Liberty server configuration for both Derby (development) and DB2 (production) deployments.
 
 ## Build Commands
 
-<CodeGroup>
-  ```bash Maven
-  mvn install
-  ```
+Run the following from the root of the cloned repository:
 
-  ```bash Maven (with functional tests)
-  mvn -DlibertyRoot=/path/to/wlp install
-  ```
+```bash
+mvn install
+```
 
-  ```bash Gradle
-  gradle build
-  ```
-</CodeGroup>
+This performs a full build of all three modules in order and produces the final EAR artifact. To also run the functional test suite against a running Liberty server, pass the location of your Liberty installation as the `libertyRoot` system property:
 
-Running `mvn install` without any additional flags performs a full build of all three modules and packages the EAR. When functional tests are enabled (by supplying `-DlibertyRoot`), the build also starts the Liberty server and runs the integration test suite against the running application. For Gradle builds, set the `libertyRoot` property in `gradle.properties` to point to your Liberty installation before running `gradle build` with tests.
+```bash
+mvn -DlibertyRoot=/path/to/wlp install
+```
 
 ## Build Output
 
@@ -64,9 +63,14 @@ After a successful `mvn install`, the key output artifacts are:
 |------|-------------|
 | `daytrader-ee7/target/daytrader-ee7.ear` | The assembled EAR artifact, ready for deployment to any compatible Liberty server |
 | `daytrader-ee7/target/liberty/wlp/` | The Open Liberty runtime downloaded and configured by the Maven Liberty plugin |
-| `daytrader-ee7/target/liberty/wlp/usr/servers/daytrader-ee7/apps/` | Auto-deployed location of `daytrader-ee7.ear` used by `mvn liberty:run` |
+| `daytrader-ee7/target/liberty/wlp/usr/shared/resources/DerbyLibs/` | Derby JDBC driver copied here for use by the embedded Liberty server |
 
-The `liberty:run` Maven goal starts the server directly from `daytrader-ee7/target/liberty/`, so no separate Liberty installation step is required for development.
+The `liberty:run` Maven goal starts the server directly from `daytrader-ee7/target/liberty/`, so no separate Liberty installation step is required for local development:
+
+```bash
+cd daytrader-ee7
+mvn liberty:run
+```
 
 ## Building for Production with DB2
 

@@ -1,7 +1,7 @@
 ---
-title: "Run DayTrader 7 in a Docker Container with DB2"
+title: "Containerize DayTrader 7 with DB2 on WebSphere Liberty"
 sidebarTitle: "Docker"
-description: "Containerize DayTrader 7 using the provided Containerfile with IBM WebSphere Liberty and a DB2 database backend."
+description: "Build and run DayTrader 7 in a container using Containerfile_db2, the IBM WebSphere Liberty kernel image, and an external DB2 database backend."
 ---
 
 The repository provides a `Containerfile_db2` that packages DayTrader 7 on top of the official IBM WebSphere Liberty kernel image (`icr.io/appcafe/websphere-liberty:kernel-java17-openj9-ubi`), using Java 17 with the Eclipse OpenJ9 JVM on Red Hat Universal Base Image (UBI). The container is configured for a DB2 backend via `server_db2_container.xml`, which resolves all database connection details from environment variables passed at `docker run` time.
@@ -9,6 +9,10 @@ The repository provides a `Containerfile_db2` that packages DayTrader 7 on top o
 <Warning>
   `Containerfile_db2` does **not** include an embedded Derby database. A running and accessible DB2 instance is required before starting the container. Without it, Liberty will fail to acquire a data-source connection on startup.
 </Warning>
+
+<Note>
+  The repository also contains a plain `Dockerfile` (based on `open-liberty:full`) that packages DayTrader 7 with the Derby-embedded database and `server.xml`. It is suitable for quick local container runs without an external database, but is not intended for load testing or production use. Build it with `docker build -t sample-daytrader7 .` from the repository root.
+</Note>
 
 ## Prerequisites
 

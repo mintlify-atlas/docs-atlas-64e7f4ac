@@ -224,6 +224,31 @@ http://<openliberty-hostname>:9082/daytrader/config?action=resetTrade
   The reset removes all users registered during the run (those with the `ru:` prefix) and marks outstanding orders as completed. Skipping the reset means successive runs operate on a progressively larger database, making results non-comparable.
 </Note>
 
+## TradeScenario workload mix
+
+The `TradeScenarioServlet` (URL: `/daytrader/scenario`) emulates a population of users by selecting a random trade operation on each HTTP request. The mix is defined in `TradeConfig.java` and determines what percentage of requests exercise each operation path.
+
+**Standard mix** (default):
+
+| Operation constant | Action | Standard mix | High-volume mix |
+|---|---|---|---|
+| `HOME_OP` | Display market summary home page | 20 % | 20 % |
+| `QUOTE_OP` | Look up a stock quote | 40 % | 40 % |
+| `LOGIN_OP` | Log in *(always 0 — handled implicitly by LOGOUT_OP)* | 0 % | 0 % |
+| `LOGOUT_OP` | Log out *(triggers a new login on the next request)* | 4 % | 4 % |
+| `REGISTER_OP` | Register a new user | 2 % | 2 % |
+| `ACCOUNT_OP` | View account details | 10 % | 7 % |
+| `PORTFOLIO_OP` | View user portfolio | 12 % | 7 % |
+| `BUY_OP` | Buy stock | 4 % | 7 % |
+| `SELL_OP` | Sell stock | 4 % | 7 % |
+| `UPDATEACCOUNT_OP` | Update account profile | 4 % | 6 % |
+
+The High-volume mix shifts weight from account/portfolio lookups toward buy and sell operations, simulating a more trade-heavy workload.
+
+<Warning>
+  Performance numbers collected when using the **TradeScenario servlet** as the workload driver are artificially deflated compared to results obtained with the JMeter test plans. The scenario servlet manages all client state on the application server itself, consuming CPU and threads that would normally be on the client. Use the JMeter test plans for all meaningful benchmark comparisons.
+</Warning>
+
 ## Key configuration parameters
 
 These parameters, set via the DayTrader configuration page or `server.xml`, have the largest effect on benchmark results. Change only one at a time when comparing measurements.

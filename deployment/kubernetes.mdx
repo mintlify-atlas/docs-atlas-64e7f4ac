@@ -1,7 +1,7 @@
 ---
 title: "Deploy DayTrader 7 on Kubernetes with OpenLiberty Operator"
 sidebarTitle: "Kubernetes"
-description: "Deploy DayTrader 7 to a Kubernetes cluster using the OpenLiberty Operator and DB2 backend, with provided YAML manifests."
+description: "Deploy DayTrader 7 to Kubernetes or OpenShift using the OpenLiberty Operator, a DB2 backend, and the five YAML manifests in the repo's deploy/ directory."
 ---
 
 The repository includes a set of Kubernetes manifests under `deploy/` that together stand up a complete DayTrader 7 environment on a cluster. The application itself is described as an `OpenLibertyApplication` custom resource managed by the [OpenLiberty Operator](https://github.com/OpenLiberty/open-liberty-operator), and the database tier is a containerized DB2 instance deployed as a standard `Deployment` with an accompanying `Service`. RBAC resources and a `Secret` round out the manifest set.
